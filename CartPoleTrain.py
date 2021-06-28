@@ -1,76 +1,100 @@
 import gym
-
+import numpy as np
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import torchvision.transforms as T
+
+from itertools import count
 from gym import wrappers
+from torch import from_numpy, as_tensor, float32
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+learning_rate = 0.001
+eps = 0.05
+gamma = 0.999
+episode_count = 1000
 
 
 class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
         self.model = nn.Sequential(
-            nn.Linear(4, 8),
-            nn.Linear(8, 2),
+            nn.Linear(4, 5),
+            nn.Linear(5, 2),
         )
 
-    # Called with either one element to determine
-    # next action or a batch during optimization.
+    # x could be a single state or a batch
     def forward(self, x):
-        x.to(device)
         return self.model(x)
 
 
-class RandomAgent(object):
-    """The world's simplest agent!"""
-    def __init__(self, action_space):
-        self.action_space = action_space
+class Agent(object):
 
-    def act(self, observation, reward, done):
-        return self.action_space.sample()
+    def __init__(self, action_space, model, eps):
+        self.action_space = action_space
+        self.model = model
+        self.eps = eps
+
+    def get_action(self, state):
+        with torch.no_grad():
+            q_values = self.model(state)
+            if np.random.uniform() < self.eps:
+                return self.action_space.sample(), q_values
+            else:
+                action = q_values.argmax()
+                return action.item(), q_values
+
+
+def to_tensor(x):
+    return as_tensor(x, dtype=float32).to(device)
 
 
 def main():
-    learning_rate = 0.001
-    eps = 0.1
-    gamma = 0.999
 
     model = DQN().to(device)
-    loss = nn.MSELoss()
+    mse_loss = nn.MSELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
 
-    print('Using {} device'.format(device))
+    print(f'Using {device} device: {torch.cuda.get_device_name(device=device)}')
     print(model)
 
-    outdir = './tmp/random-agent-results'
     env = gym.make('CartPole-v0')
-    env = wrappers.Monitor(env, directory=outdir, force=True)
+    env = wrappers.Monitor(env, directory='./tmp', force=True)
 
-    agent = RandomAgent(env.action_space)
-
-    episode_count = 10
-    reward = 0
-    done = False
+    agent = Agent(env.action_space, model, eps)
+    episode_durations = []
 
     for i in range(episode_count):
-        ob = env.reset()
-        while True:
+        state = to_tensor(env.reset())
+        for t in count():
             env.render()
-            action = agent.act(ob, reward, done)
-            ob, reward, done, _ = env.step(action)
+
+            action, q_values = agent.get_action(state)
+            next_state, reward, done, _ = env.step(action)
+
+            # Compute prediction error
+            next_state, reward = to_tensor(next_state), to_tensor(reward)
+            q_update = reward + gamma * model(next_state).max()
+            q_update = q_update.broadcast_to(2)
+            loss = mse_loss(q_values, q_update)
+
+            # Backpropagation
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
             if done:
+                episode_durations.append(t + 1)
                 break
-            # Note there's no env.render() here. But the environment still can open window and
-            # render if asked by env.monitor: it calls env.render('rgb_array') to record video.
-            # Video is not recorded every episode, see capped_cubic_video_schedule for details.
 
     # Close the env and write monitor result info to disk
     env.close()
+    plt.plot(episode_durations)
+    plt.xlabel('Episode')
+    plt.ylabel('Duration')
+    plt.savefig('./tmp/training.png')
+    plt.show()
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
