@@ -13,11 +13,13 @@ from tqdm import tqdm
 from gym import wrappers
 from torch import from_numpy, as_tensor, float32, int64
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device_name = torch.cuda.get_device_name(device=device) if device == 'cuda' else '-'
 
 learning_rate = 0.1
-eps_0 = 0.9
-eps_N = 0.001
+eps_0 = 1.0
+eps_min = 0.0
+eps_decay = 0.98
 gamma = 0.99
 episode_count = 2000
 batch_size = 50
@@ -39,10 +41,13 @@ class DQN(nn.Module):
 
 class Agent:
 
-    def __init__(self, action_space, model, eps_0, eps_N, N):
+    def __init__(self, action_space, model, eps_0, eps_min, eps_decay=1.0, N=1):
         self.action_space = action_space
         self.model = model
-        self.eps = eps_0 - (eps_0 - eps_N) / N * np.arange(0, N)
+        # linear
+        # self.eps = eps_0 - (eps_0 - eps_min) / N * np.arange(0, N)
+        # exponential
+        self.eps = np.full(N, eps_0) * np.full(N, eps_decay) ** np.arange(0, N)
 
     def get_action(self, state, episode):
         state = to_tensor(state)
@@ -86,12 +91,12 @@ def main():
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     
     weights = sum(p.numel() for p in model.parameters())
-    print(f'Using {device} device: {torch.cuda.get_device_name(device=device)}')
     print(f'{weights} weights, model: {model}')
+    print(f'Using {device} device: {device_name}')
 
     env = gym.make('CartPole-v0')
     env = wrappers.Monitor(env, directory='./tmp', force=True)
-    agent = Agent(env.action_space, model, eps_0, eps_N, episode_count)
+    agent = Agent(env.action_space, model, eps_0, eps_min, eps_decay, episode_count)
     episode_durations = []
 
     for episode in tqdm(range(episode_count)):
@@ -129,6 +134,8 @@ def main():
 
     # Close the env and write monitor result to disk
     env.close()
+    filename = './tmp/training.png'
+    filename_old = './tmp/training_previous.png'
     fig, (ax0, ax1) = plt.subplots(1, 2)
     fig.suptitle(f'{weights} weights, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}')
     ax0.plot(episode_durations)
@@ -136,8 +143,9 @@ def main():
     ax1.plot(agent.eps, color='r')
     ax1.set(xlabel='Episode', ylabel='Epsilon', yscale='log')
     plt.tight_layout()
-    os.replace('./tmp/training.png', './tmp/training_previous.png')
-    plt.savefig('./tmp/training.png')
+    if os.path.isfile(filename):
+        os.replace(filename, filename_old)
+    plt.savefig(filename)
     plt.show()
 
 
