@@ -19,6 +19,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
 
 learning_rate = 0.05
+elasticity = 0.1
 eps_0 = 1.0
 eps_min = 0.0
 eps_decay = 0.99
@@ -26,10 +27,12 @@ gamma = 0.9
 episode_count = 1500
 batch_size = 50
 
+workers = 3
+
 
 class DQN(nn.Module):
     def __init__(self):
-        super(DQN, self).__init__()
+        super().__init__()
         self.model = nn.Sequential(
             nn.Linear(4, 30),
             nn.ReLU(),
@@ -88,18 +91,21 @@ def to_tensor(x, dtype=float32):
 
 
 def main():
-    model = DQN().to(device)
+    master_model = DQN().to(device)
+
     memory = ReplayMemory()
     mse_loss = nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+    models = [DQN().to(device) for i in range(0, workers)]
+    optimizers = [torch.optim.SGD(model.parameters(), lr=learning_rate) for model in models]
     
-    weights = sum(p.numel() for p in model.parameters())
-    print(f'{weights} weights, model: {model}')
+    weights = sum(p.numel() for p in master_model.parameters())
+    print(f'{weights} weights, model: {master_model}')
     print(f'Using {device} device: {device_name}')
 
     env = gym.make('CartPole-v0')
-    env = wrappers.Monitor(env, directory='./tmp', force=True)
-    agent = Agent(env.action_space, model, eps_0, eps_min, eps_decay, episode_count)
+    env = wrappers.Monitor(env, directory='./tmp_easgd', force=True)
+    agent = Agent(env.action_space, master_model, eps_0, eps_min, eps_decay, episode_count)
     episode_durations = []
 
     for episode in tqdm(range(episode_count)):
@@ -107,6 +113,7 @@ def main():
 
         for t in count():
             # env.render()
+            # actions are sampled from master net
             action = agent.get_action(state, episode)
             next_state, reward, final, _ = env.step(action)
             memory.push(state, action, next_state, reward, int(not final))
@@ -120,17 +127,34 @@ def main():
                 next_states = to_tensor(batch.next_state)
                 non_final = to_tensor(batch.non_final)
 
-                # q_update = r,  for final s'
-                #            r + gamma * max_a Q(s', :), otherwise
-                indices = torch.stack((actions, actions))
-                q_values = model(states).t().gather(0, indices)[0]
-                q_update = rewards + non_final * gamma * model(next_states).amax(dim=1)
-                loss = mse_loss(q_update, q_values)
+                # gradient update is done for N workers with master net as regularisation
+                for i, model in enumerate(models):
+                    optimizer = optimizers[i]
 
-                # Backpropagation
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    # q_update = r,  for final s'
+                    #            r + gamma * max_a Q(s', :), otherwise
+                    indices = torch.stack((actions, actions))
+                    q_values = model(states).t().gather(0, indices)[0]
+                    q_update = rewards + non_final * gamma * master_model(next_states).amax(dim=1)
+                    worker_w = model.state_dict()
+                    master_w = master_model.state_dict()
+                    # for module_name in model.state_dict():
+                    #     print(module_name)
+                    #     print(model.state_dict()[module_name])
+
+                    print(model.state_dict().values())
+
+                    worker_w = [w for w in model.state_dict().values()], (-1,)]
+                    master_w = [w for w in master_model.state_dict().values()]
+
+                    loss = mse_loss(q_values, q_update) #+ elasticity * mse_loss(worker_w, master_w)
+
+                    # Backpropagation
+                    optimizer.zero_grad()
+                    loss.backward()
+                    # for param in model.parameters():
+                    #     param.grad.data.clamp_(-1, 1)
+                    optimizer.step()
 
             if final:
                 episode_durations.append(t + 1)
