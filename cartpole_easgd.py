@@ -19,15 +19,16 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
 
 learning_rate = 0.05
-elasticity = 0.1
 eps_0 = 1.0
 eps_min = 0.0
 eps_decay = 0.99
 gamma = 0.9
-episode_count = 1500
+episode_count = 700
 batch_size = 50
 
+elasticity = 0.1
 workers = 3
+commute_t = 10
 
 
 class DQN(nn.Module):
@@ -91,14 +92,13 @@ def to_tensor(x, dtype=float32):
 
 
 def main():
-    master_model = DQN().to(device)
-
     memory = ReplayMemory()
     mse_loss = nn.MSELoss()
 
+    master_model = DQN().to(device)
     models = [DQN().to(device) for i in range(0, workers)]
     optimizers = [torch.optim.SGD(model.parameters(), lr=learning_rate) for model in models]
-    
+
     weights = sum(p.numel() for p in master_model.parameters())
     print(f'{weights} weights, model: {master_model}')
     print(f'Using {device} device: {device_name}')
@@ -113,7 +113,7 @@ def main():
 
         for t in count():
             # env.render()
-            # actions are sampled from master net
+            # actions are sampled from the master net
             action = agent.get_action(state, episode)
             next_state, reward, final, _ = env.step(action)
             memory.push(state, action, next_state, reward, int(not final))
@@ -127,7 +127,9 @@ def main():
                 next_states = to_tensor(batch.next_state)
                 non_final = to_tensor(batch.non_final)
 
-                # gradient update is done for N workers with master net as regularisation
+                # gradient update for N workers with the master net as regularisation
+                master_w = [w.flatten() for w in master_model.state_dict().values()]
+                master_w = torch.cat(master_w)
                 for i, model in enumerate(models):
                     optimizer = optimizers[i]
 
@@ -136,18 +138,11 @@ def main():
                     indices = torch.stack((actions, actions))
                     q_values = model(states).t().gather(0, indices)[0]
                     q_update = rewards + non_final * gamma * master_model(next_states).amax(dim=1)
-                    worker_w = model.state_dict()
-                    master_w = master_model.state_dict()
-                    # for module_name in model.state_dict():
-                    #     print(module_name)
-                    #     print(model.state_dict()[module_name])
 
-                    print(model.state_dict().values())
-
-                    worker_w = [w for w in model.state_dict().values()], (-1,)]
-                    master_w = [w for w in master_model.state_dict().values()]
-
-                    loss = mse_loss(q_values, q_update) #+ elasticity * mse_loss(worker_w, master_w)
+                    # model_parameters = filter(lambda param: param.requires_grad, model.parameters())
+                    worker_w = [w.flatten() for w in model.state_dict().values()]
+                    worker_w = torch.cat(worker_w)
+                    loss = mse_loss(q_values, q_update) + elasticity * mse_loss(worker_w, master_w)
 
                     # Backpropagation
                     optimizer.zero_grad()
@@ -156,16 +151,30 @@ def main():
                     #     param.grad.data.clamp_(-1, 1)
                     optimizer.step()
 
+                # master update - moving toward mean of workers
+                if t % commute_t == 0:
+                    # print(master_model.state_dict()['model.0.weight'][0])
+
+                    for key in master_model.state_dict().keys():
+                        for i, w in enumerate(master_model.state_dict()[key]):
+                            workers_sum = 0
+                            for model in models:
+                                workers_sum += model.state_dict()[key][i]
+                            # w = (1 - learning_rate * elasticity * workers) * w + learning_rate * elasticity * workers_sum
+                            w.multiply_(1 - learning_rate * elasticity * workers)
+                            w.add_(learning_rate * elasticity * workers_sum)
+
             if final:
                 episode_durations.append(t + 1)
                 break
 
     # Close the env and write monitor result to disk
     env.close()
-    title = f'{weights} weights, clamp, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}'
+    title = f'{weights} weights, workers: {workers}, elasticity: {elasticity}, tau: {commute_t}, ' \
+            f'batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp/{time}_training_qnn.png'
+    filename = f'./tmp_easgd/{time}_training_qnn_easgd.png'
     plot_results(episode_durations, agent.eps, title, info, filename)
 
 

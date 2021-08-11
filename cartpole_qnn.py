@@ -18,12 +18,12 @@ from drawing import plot_results
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
 
-learning_rate = 0.05
+learning_rate = 0.07
 eps_0 = 1.0
 eps_min = 0.0
 eps_decay = 0.99
 gamma = 0.9
-episode_count = 1500
+episode_count = 700
 batch_size = 50
 
 
@@ -138,7 +138,7 @@ def main():
 
     # Close the env and write monitor result to disk
     env.close()
-    title = f'{weights} weights, clamp, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}'
+    title = f'{weights} weights, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
     filename = f'./tmp/{time}_training_qnn.png'
