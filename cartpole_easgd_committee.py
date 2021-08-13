@@ -127,14 +127,6 @@ def main():
                 next_states = to_tensor(batch.next_state)
                 non_final = to_tensor(batch.non_final)
 
-                # grad = torch.autograd.grad(outputs=dummy_loss, inputs=model.parameters())
-                # learning_rate = 0.1
-                # with torch.no_grad():
-                #     for param_tensor, param_tensor_grad in zip(model.parameters(), grad):
-                #         # Simple SGD without momentum
-                #         new_param_tensor = param_tensor - learning_rate * param_tensor_grad
-                #         param_tensor.copy_(new_param_tensor)
-
                 # gradient update for N workers with the master net as regularisation
                 master_w = [w.flatten() for w in master_model.state_dict().values()]
                 master_w = torch.cat(master_w)
@@ -147,6 +139,7 @@ def main():
                     q_values = model(states).t().gather(0, indices)[0]
                     q_update = rewards + non_final * gamma * master_model(next_states).amax(dim=1)
 
+                    # only trainable
                     # model_parameters = filter(lambda param: param.requires_grad, model.parameters())
                     worker_w = [w.flatten() for w in model.state_dict().values()]
                     worker_w = torch.cat(worker_w)
