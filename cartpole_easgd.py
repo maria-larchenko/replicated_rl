@@ -27,8 +27,9 @@ episode_count = 700
 batch_size = 50
 
 elasticity = 1
+master_elasticity = 0.01
 workers = 10
-commute_t = 5
+commute_t = 1
 
 
 class DQN(nn.Module):
@@ -99,8 +100,7 @@ def main():
     mse_loss = nn.MSELoss()
 
     master_model = DQN().to(device)
-    models = [DQN().to(device) for i in range(0, workers)]
-    optimizers = [torch.optim.SGD(model.parameters(), lr=learning_rate) for model in models]
+    models = [DQN().to(device) for _ in range(0, workers)]
 
     weights = sum(p.numel() for p in master_model.parameters())
     print(f'{weights} weights, model: {master_model}')
@@ -134,8 +134,6 @@ def main():
                 # master_w = torch.cat([w.flatten() for w in master_params])
 
                 for i, model in enumerate(models):
-                    optimizer = optimizers[i]
-
                     # q_update = r,  for final s'
                     #            r + gamma * max_a Q(s', :), otherwise
                     indices = torch.stack((actions, actions))
@@ -157,13 +155,18 @@ def main():
 
                     with torch.no_grad():
 
-                        average_params = [p for p in models[0].parameters()]
-                        for i in range(0, workers-1):
-                            average_params += [p for p in models[i].parameters()]
+                        # i - model, j - param num
+                        params = [[p for p in model.parameters()] for model in models]
+                        average_params = []
+                        for j in range(0, len(params[0])):
+                            avg = params[0][j]
+                            for i in range(1, workers):
+                                avg += params[i][j]
+                            average_params.append(avg)
 
-                        for param, master_param in zip(average_params, master_model.parameters()):
-                            new_master_param = master_param * (1 - learning_rate * elasticity) \
-                                               + param * learning_rate * elasticity
+                        for average_param, master_param in zip(average_params, master_model.parameters()):
+                            new_master_param = master_param * (1 - master_elasticity) \
+                                               + average_param * master_elasticity
                             master_param.copy_(new_master_param)
 
             if final:
