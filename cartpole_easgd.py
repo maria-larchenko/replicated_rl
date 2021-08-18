@@ -15,10 +15,10 @@ from torch import from_numpy, as_tensor, float32, int64
 
 from drawing import plot_results
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+device = 'cpu' #torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device_name = '-' #torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
 
-learning_rate = 0.05
+learning_rate = 0.1
 eps_0 = 1.0
 eps_min = 0.0
 eps_decay = 0.99
@@ -26,9 +26,9 @@ gamma = 0.9
 episode_count = 700
 batch_size = 50
 
-elasticity = 0.1
-workers = 3
-commute_t = 10
+elasticity = 1
+workers = 10
+commute_t = 5
 
 
 class DQN(nn.Module):
@@ -47,9 +47,10 @@ class DQN(nn.Module):
 
 class Agent:
 
-    def __init__(self, action_space, model, eps_0, eps_min, eps_decay=1.0, N=1):
+    def __init__(self, action_space, models, master_model, eps_0, eps_min, eps_decay=1.0, N=1):
         self.action_space = action_space
-        self.model = model
+        self.models = models
+        self.master_model = master_model
         # linear
         # self.eps = eps_0 - (eps_0 - eps_min) / N * np.arange(0, N)
         # exponential
@@ -57,12 +58,14 @@ class Agent:
         self.eps = np.where(self.eps < eps_min, eps_min, self.eps)
 
     def get_action(self, state, episode):
+        # model = self.models[np.random.choice(workers)]
+        model = self.master_model
         state = to_tensor(state)
         with torch.no_grad():
             if np.random.uniform() < self.eps[episode]:
                 return self.action_space.sample()
             else:
-                return self.model(state).argmax().item()
+                return model(state).argmax().item()
 
 
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'non_final'))
@@ -105,7 +108,7 @@ def main():
 
     env = gym.make('CartPole-v0')
     env = wrappers.Monitor(env, directory='./tmp_easgd', force=True)
-    agent = Agent(env.action_space, master_model, eps_0, eps_min, eps_decay, episode_count)
+    agent = Agent(env.action_space, models, master_model, eps_0, eps_min, eps_decay, episode_count)
     episode_durations = []
 
     for episode in tqdm(range(episode_count)):
@@ -113,7 +116,6 @@ def main():
 
         for t in count():
             # env.render()
-            # actions are sampled from the master net
             action = agent.get_action(state, episode)
             next_state, reward, final, _ = env.step(action)
             memory.push(state, action, next_state, reward, int(not final))
@@ -127,17 +129,10 @@ def main():
                 next_states = to_tensor(batch.next_state)
                 non_final = to_tensor(batch.non_final)
 
-                # grad = torch.autograd.grad(outputs=dummy_loss, inputs=model.parameters())
-                # learning_rate = 0.1
-                # with torch.no_grad():
-                #     for param_tensor, param_tensor_grad in zip(model.parameters(), grad):
-                #         # Simple SGD without momentum
-                #         new_param_tensor = param_tensor - learning_rate * param_tensor_grad
-                #         param_tensor.copy_(new_param_tensor)
-
                 # gradient update for N workers with the master net as regularisation
-                master_w = [w.flatten() for w in master_model.state_dict().values()]
-                master_w = torch.cat(master_w)
+                # master_params = filter(lambda param: param.requires_grad, master_model.parameters())
+                # master_w = torch.cat([w.flatten() for w in master_params])
+
                 for i, model in enumerate(models):
                     optimizer = optimizers[i]
 
@@ -145,32 +140,31 @@ def main():
                     #            r + gamma * max_a Q(s', :), otherwise
                     indices = torch.stack((actions, actions))
                     q_values = model(states).t().gather(0, indices)[0]
-                    q_update = rewards + non_final * gamma * master_model(next_states).amax(dim=1)
+                    q_update = rewards + non_final * gamma * master_model(next_states).amax(dim=1)  #<- master_model!
 
-                    # model_parameters = filter(lambda param: param.requires_grad, model.parameters())
-                    worker_w = [w.flatten() for w in model.state_dict().values()]
-                    worker_w = torch.cat(worker_w)
-                    loss = mse_loss(q_values, q_update) + elasticity * mse_loss(worker_w, master_w)
+                    loss = mse_loss(q_values, q_update)
 
-                    # Backpropagation
-                    optimizer.zero_grad()
-                    loss.backward()
-                    # for param in model.parameters():
-                    #     param.grad.data.clamp_(-1, 1)
-                    optimizer.step()
+                    # Alexander Lobashev:
+                    grad = torch.autograd.grad(outputs=loss, inputs=model.parameters())
+                    with torch.no_grad():
+                        for param, master_param, param_grad in zip(model.parameters(), master_model.parameters(), grad):
+                            new_param = param - learning_rate * (param_grad + elasticity * (param - master_param))
+                            param.copy_(new_param)
 
                 # master update - moving toward mean of workers
                 if t % commute_t == 0:
                     # print(master_model.state_dict()['model.0.weight'][0])
 
-                    for key in master_model.state_dict().keys():
-                        for i, w in enumerate(master_model.state_dict()[key]):
-                            workers_sum = 0
-                            for model in models:
-                                workers_sum += model.state_dict()[key][i]
-                            # w = (1 - learning_rate * elasticity * workers) * w + learning_rate * elasticity * workers_sum
-                            w.multiply_(1 - learning_rate * elasticity * workers)
-                            w.add_(learning_rate * elasticity * workers_sum)
+                    with torch.no_grad():
+
+                        average_params = [p for p in models[0].parameters()]
+                        for i in range(0, workers-1):
+                            average_params += [p for p in models[i].parameters()]
+
+                        for param, master_param in zip(average_params, master_model.parameters()):
+                            new_master_param = master_param * (1 - learning_rate * elasticity) \
+                                               + param * learning_rate * elasticity
+                            master_param.copy_(new_master_param)
 
             if final:
                 episode_durations.append(t + 1)
