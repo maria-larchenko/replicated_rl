@@ -13,7 +13,7 @@ from tqdm import tqdm
 from gym import wrappers
 from torch import from_numpy, as_tensor, float32, int64
 
-from drawing import plot_results
+from drawing import plot_result
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
@@ -23,7 +23,7 @@ eps_0 = 1.0
 eps_min = 0.0
 eps_decay = 0.99
 gamma = 0.9
-episode_count = 700
+episode_count = 500
 batch_size = 50
 
 
@@ -142,7 +142,7 @@ def main():
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
     filename = f'./tmp/{time}_training_qnn.png'
-    plot_results(episode_durations, agent.eps, title, info, filename)
+    plot_result(episode_durations, agent.eps, title, info, filename)
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
