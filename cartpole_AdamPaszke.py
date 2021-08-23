@@ -42,6 +42,7 @@ We'll also use the following from PyTorch:
 -  utilities for vision tasks (``torchvision`` - `a separate
    package <https://github.com/pytorch/vision>`__).
 """
+from datetime import datetime
 
 import gym
 import math
@@ -60,12 +61,16 @@ import torch.nn.functional as F
 import torchvision.transforms as T
 
 
-env = gym.make('CartPole-v0').unwrapped
+# env = gym.make('CartPole-v0').unwrapped
+from gym import wrappers
 
-# set up matplotlib
-is_ipython = 'inline' in matplotlib.get_backend()
-if is_ipython:
-    from IPython import display
+env = gym.make('CartPole-v0')
+env = wrappers.Monitor(env, directory='./tmp_dqn', force=True)
+
+# # set up matplotlib
+# is_ipython = 'inline' in matplotlib.get_backend()
+# if is_ipython:
+#     from IPython import display
 
 plt.ion()
 
@@ -355,9 +360,9 @@ def plot_durations():
         plt.plot(means.numpy())
 
     plt.pause(0.001)  # pause a bit so that plots are updated
-    if is_ipython:
-        display.clear_output(wait=True)
-        display.display(plt.gcf())
+    # if is_ipython:
+    #     display.clear_output(wait=True)
+    #     display.display(plt.gcf())
 
 
 ######################################################################
@@ -478,6 +483,7 @@ print('Complete')
 env.render()
 env.close()
 plt.ioff()
+plt.savefig(f'./tmp_dqn/{datetime.now().strftime("%Y.%m.%d %H-%M")}_training.png')
 plt.show()
 
 ######################################################################
