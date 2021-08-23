@@ -89,8 +89,8 @@ def to_tensor(x, dtype=float32):
 
 
 def main():
-    memory = ReplayMemory()
     mse_loss = nn.MSELoss()
+    memory = [ReplayMemory() for _ in range(0, N)]
 
     master_model = DQN().to(device)
     models = [DQN().to(device) for _ in range(0, N)]
@@ -122,12 +122,12 @@ def main():
 
             action = agent.get_action(state)
             next_state, reward, final, _ = env.step(action)
-            memory.push(state, action, next_state, reward, int(not final))
+            memory[i].push(state, action, next_state, reward, int(not final))
             agent_states[i] = next_state
 
             # gradient update for N workers with the master net as regularisation
-            if len(memory) > batch_size:
-                batch = memory.sample(batch_size)
+            if len(memory[i]) > batch_size:
+                batch = memory[i].sample(batch_size)
                 states = to_tensor(batch.state)
                 actions = to_tensor(batch.action, dtype=int64)
                 rewards = to_tensor(batch.reward)
@@ -183,7 +183,7 @@ def main():
             f'batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_easgd_multiagent/{time}_training_multiagent.png'
+    filename = f'./tmp_easgd_distributed/{time}_training_dist.png'
     plot_results(episode_durations, epsilon, title, info, filename)
 
 
