@@ -300,10 +300,12 @@ plt.show()
 
 BATCH_SIZE = 128
 GAMMA = 0.999
-EPS_START = 0.9
-EPS_END = 0.05
+EPS_START = 1.0
+EPS_END = 0.01
 EPS_DECAY = 200
 TARGET_UPDATE = 10
+
+learning_rate = 0.001
 
 # Get screen size so that we can initialize layers correctly based on shape
 # returned from AI gym. Typical dimensions at this point are close to 3x40x90
@@ -319,7 +321,9 @@ target_net = DQN(screen_height, screen_width, n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 target_net.eval()
 
-optimizer = optim.RMSprop(policy_net.parameters())
+optimizer = optim.RMSprop(policy_net.parameters())  # original
+optimizer = optim.SGD(policy_net.parameters(), lr=learning_rate)  # gives better results!
+
 memory = ReplayMemory(10000)
 
 
@@ -418,7 +422,8 @@ def optimize_model():
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
 
     # Compute Huber loss
-    criterion = nn.SmoothL1Loss()
+    # criterion = nn.SmoothL1Loss()  # original
+    criterion = nn.MSELoss()
     loss = criterion(state_action_values, expected_state_action_values.unsqueeze(1))
 
     # Optimize the model
@@ -442,7 +447,7 @@ def optimize_model():
 # duration improvements.
 #
 
-num_episodes = 500
+num_episodes = 1000
 for i_episode in range(num_episodes):
     # Initialize the environment and state
     env.reset()
