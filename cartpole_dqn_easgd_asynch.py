@@ -13,20 +13,22 @@ from PIL import Image
 
 from collections import namedtuple, deque
 from itertools import count
+
+from matplotlib import pyplot as plt
 from tqdm import tqdm
 from torch import from_numpy, as_tensor, float32, int64
 
 from drawing import plot_results
 
-device = 'cpu' #torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_name = '-' #torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
 
-learning_rate = 0.005
+learning_rate = 0.01
 eps_0 = 1.0
 eps_min = 0.01
 eps_decay = 0.999
 gamma = 0.999
-episode_count = 4000
+episode_count = 700
 batch_size = 128
 
 clamp = True
@@ -163,13 +165,19 @@ def main():
     tmp = DQN(screen_height, screen_width, n_actions).to(device)
 
     master.load_state_dict(models[0].state_dict())
-    with torch.no_grad():
-        for i in range(1, N):
-            for param, master_param in zip(models[i].parameters(), master.parameters()):
-                new_master_param = master_param + param
-                master_param.copy_(new_master_param)
-        for master_param in master.parameters():
-            master_param.divide_(N)
+
+    # Replicated SGD style:
+    # with torch.no_grad():
+    #     for i in range(1, N):
+    #         for param, master_param in zip(models[i].parameters(), master.parameters()):
+    #             new_master_param = master_param + param
+    #             master_param.copy_(new_master_param)
+    #     for master_param in master.parameters():
+    #         master_param.divide_(N)
+
+    # AE SGD style:
+    for i in range(1, N):
+        models[i].load_state_dict(master.state_dict())
 
     weights = sum(p.numel() for p in master.parameters())
     print(f'{weights} weights, model: {master}')
@@ -179,6 +187,10 @@ def main():
     episode_durations = [[] for _ in range(0, N)]
     episode_counter = [0 for _ in range(0, N)]
     rolling_return = [0 for _ in range(0, N)]
+    test_grad_0 = []
+    test_grad_12 = []
+    test_elasticity_0 = []
+    test_elasticity_12 = []
     epsilon = []
     agent_states = []
     agent_screens = []
@@ -192,8 +204,11 @@ def main():
         agent_states.append(state)
         agent_screens.append(current_screen)
 
-    for t in tqdm(count()):
-        if len(episode_durations[0]) > episode_count:
+    # for t in tqdm(count()):
+    for t in count():
+        if len(episode_durations[0]) > episode_count \
+                or len(episode_durations[1]) > episode_count \
+                or len(episode_durations[2]) > episode_count:
             break
 
         for i in range(0, N):
@@ -245,16 +260,27 @@ def main():
 
                 loss = mse_loss(q_values, q_update)
 
+                test_grad_val_0 = None
+                test_grad_val_12 = None
                 grad = torch.autograd.grad(outputs=loss, inputs=model.parameters())
                 with torch.no_grad():
+                    k = 0
                     for param, param_grad in zip(model.parameters(), grad):
                         if clamp:
                             param_grad.data.clamp_(-1, 1)
                         new_param = param - learning_rate * param_grad
                         param.copy_(new_param)
+                        if k == 0:
+                            test_grad_val_0 = torch.mean(torch.abs(learning_rate * param_grad))
+                        if k == 12:
+                            test_grad_val_12 = torch.mean(torch.abs(learning_rate * param_grad))
+                        k += 1
 
+                test_elasticity_val_0 = None
+                test_elasticity_val_12 = None
                 if commute_t is not None and t % commute_t == 0:
                     with torch.no_grad():
+                        k = 0
                         for param, tmp_param, master_param in zip(model.parameters(), tmp.parameters(),
                                                                   master.parameters()):
                             if t < return_time:
@@ -262,11 +288,21 @@ def main():
                             else:
                                 mass = np.exp(rolling_return[i]) / np.sum(np.exp(rolling_return))
 
+                            if k == 0:
+                                test_elasticity_val_0 = torch.mean(torch.abs(elasticity * (tmp_param - master_param)))
+                            if k == 12:
+                                test_elasticity_val_12 = torch.mean(torch.abs(elasticity * (tmp_param - master_param)))
+                            k += 1
                             new_param = param - elasticity * (tmp_param - master_param)
                             new_master_param = master_param + mass * (tmp_param - master_param)
-
                             param.copy_(new_param)
                             master_param.copy_(new_master_param)
+
+                if commute_t is not None and t % commute_t == 0:
+                    test_grad_0.append(test_grad_val_0.to('cpu'))
+                    test_grad_12.append(test_grad_val_12.to('cpu'))
+                    test_elasticity_0.append(test_elasticity_val_0.to('cpu'))
+                    test_elasticity_12.append(test_elasticity_val_12.to('cpu'))
             if final:
                 rolling_return[i] = 0
                 episode_durations[i].append(episode_counter[i])
@@ -284,13 +320,26 @@ def main():
 
     # Close the env and write monitor result to disk
     [env.close() for env in environments]
-    title = f'Asynch AESGD (rand init) + DQN by AdamPaszke\n' \
+    title = f'Asynch AESGD + DQN by AdamPaszke\n' \
             f'agents: {N}, commute: {commute_t}, elasticity: {elasticity}, asym. after: {return_time}t, ' \
             f'lr: {learning_rate}, gamma: {gamma}, batch: {batch_size}, clamp: {clamp}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_dqn_distributed_asynch/{time}_dqn_dist_asynch rnd.png'
+    filename = f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch.png'
+
+    fig, (ax0, ax1) = plt.subplots(1, 2)
+    ax0.plot(test_grad_0, label='grad_0')
+    ax0.plot(test_elasticity_0, label='elasticity_0')
+    ax1.plot(test_grad_12, label='grad_12')
+    ax1.plot(test_elasticity_12, label='elasticity_12')
+    ax0.set_xlabel('elasticity updates')
+    ax1.set_xlabel('elasticity updates')
+    ax0.legend()
+    ax1.legend()
+    plt.savefig(f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch grad.png')
+
     plot_results(episode_durations, epsilon, title, info, filename)
+    plt.show()
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main

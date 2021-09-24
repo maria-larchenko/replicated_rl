@@ -26,7 +26,7 @@ eps_0 = 1.0
 eps_min = 0.01
 eps_decay = 0.999
 gamma = 0.999
-episode_count = 4000
+episode_count = 700
 batch_size = 128
 
 clamp = True

@@ -32,12 +32,11 @@ def plot_result(score, epsilon, title, info, filename, mean_window=100):
     plt.show()
 
 
-def plot_results(scores, epsilon, title, info, filename, mean_window=100):
+def plot_results(scores, epsilon, title, info, filename, mean_window=100, cmap='PuBu'):
     fig, (ax0, ax1) = plt.subplots(1, 2)
     fig.suptitle(title)
-    colormap = plt.get_cmap('PuBu')
+    colormap = plt.get_cmap(cmap)
     colorcycler = cycler(color=[colormap(k) for k in np.linspace(0.4, 1, len(scores))])
-
 
     ax0.set(xlabel='Episode', ylabel='Score')
     ax0.set_prop_cycle(colorcycler)
