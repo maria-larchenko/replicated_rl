@@ -32,39 +32,48 @@ episode_count = 700
 batch_size = 128
 
 clamp = True
-elasticity = 0.05
+elasticity = 0.1
 N = 3
-commute_t = 5
-return_time = np.inf
+commute_t = 1
+
+a = torch.Tensor((-2, -1, 0, 1, 2))
+print(a)
+print(F.relu(a))
 
 
 class DQN(nn.Module):
 
     def __init__(self, h, w, outputs):
         super(DQN, self).__init__()
-        self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=2)
-        self.bn1 = nn.BatchNorm2d(16)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=2)
-        self.bn2 = nn.BatchNorm2d(32)
-        self.conv3 = nn.Conv2d(32, 32, kernel_size=5, stride=2)
-        self.bn3 = nn.BatchNorm2d(32)
 
-        # Number of Linear input connections depends on output of conv2d layers
-        # and therefore the input image size, so compute it.
-        def conv2d_size_out(size, kernel_size = 5, stride = 2):
-            return (size - (kernel_size - 1) - 1) // stride  + 1
-        convw = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
-        convh = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
-        linear_input_size = convw * convh * 32
-        self.head = nn.Linear(linear_input_size, outputs)
+        # Number of linear input connections depends on output of conv2d layers
+        # and therefore the input image size, so lets compute it
+        def conv2d_size_out(size, kernel_size=5, stride=2):
+            return (size - (kernel_size - 1) - 1) // stride + 1
+
+        conv_w = conv2d_size_out(conv2d_size_out(conv2d_size_out(w)))
+        conv_h = conv2d_size_out(conv2d_size_out(conv2d_size_out(h)))
+        linear_input_size = conv_w * conv_h * 32
+
+        self.model = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=(5, 5), stride=(2, 2)),
+            nn.BatchNorm2d(16, affine=False),
+            nn.Conv2d(16, 32, kernel_size=(5, 5), stride=(2, 2)),
+            nn.BatchNorm2d(32, affine=False),
+            nn.Conv2d(32, 32, kernel_size=(5, 5), stride=(2, 2)),
+            nn.BatchNorm2d(32, affine=False),
+        )
+        self.head = nn.Sequential(
+            nn.Linear(linear_input_size, 30),
+            nn.ReLU(),
+            nn.Linear(30, outputs)
+        )
 
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, x):
         x = x.to(device)
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.model(x)
         return self.head(x.view(x.size(0), -1))
 
 
@@ -126,7 +135,7 @@ def get_screen(env):
     screen = env.render(mode='rgb_array').transpose((2, 0, 1))
     # Cart is in the lower half, so strip off the top and bottom of the screen
     _, screen_height, screen_width = screen.shape
-    screen = screen[:, int(screen_height*0.4):int(screen_height * 0.8)]
+    screen = screen[:, int(screen_height * 0.4):int(screen_height * 0.8)]
     view_width = int(screen_width * 0.6)
     cart_location = get_cart_location(screen_width, env)
     if cart_location < view_width // 2:
@@ -186,7 +195,6 @@ def main():
     agents = [Agent(env.action_space, model, eps_0) for env, model in zip(environments, models)]
     episode_durations = [[] for _ in range(0, N)]
     episode_counter = [0 for _ in range(0, N)]
-    rolling_return = [0 for _ in range(0, N)]
     test_grad_0 = []
     test_grad_12 = []
     test_elasticity_0 = []
@@ -195,6 +203,7 @@ def main():
     agent_states = []
     agent_screens = []
 
+    print(f'START: {datetime.now().strftime("%Y.%m.%d %H-%M-%S")}')
     for env in environments:
         env.reset()
 
@@ -230,7 +239,6 @@ def main():
                 next_state = None
 
             memory[i].push(state, action, next_state, reward, int(not final))
-            rolling_return[i] += reward
 
             agent_states[i] = next_state
             agent_screens[i] = current_screen
@@ -253,10 +261,7 @@ def main():
                 #            r + gamma * max_a Q(s', :), otherwise
                 indices = torch.stack((actions, actions))
                 q_values = model(states).t().gather(0, indices)[0]
-                # if commute_t is None:  #or rand init
                 q_update = rewards + non_final * gamma * next_state_values
-                # else:
-                #     q_update = rewards + non_final * gamma * master(next_states).amax(dim=1)
 
                 loss = mse_loss(q_values, q_update)
 
@@ -272,7 +277,7 @@ def main():
                         param.copy_(new_param)
                         if k == 0:
                             test_grad_val_0 = torch.mean(torch.abs(learning_rate * param_grad))
-                        if k == 12:
+                        if k == 7:
                             test_grad_val_12 = torch.mean(torch.abs(learning_rate * param_grad))
                         k += 1
 
@@ -283,18 +288,13 @@ def main():
                         k = 0
                         for param, tmp_param, master_param in zip(model.parameters(), tmp.parameters(),
                                                                   master.parameters()):
-                            if t < return_time:
-                                mass = elasticity
-                            else:
-                                mass = np.exp(rolling_return[i]) / np.sum(np.exp(rolling_return))
-
                             if k == 0:
                                 test_elasticity_val_0 = torch.mean(torch.abs(elasticity * (tmp_param - master_param)))
-                            if k == 12:
+                            if k == 7:
                                 test_elasticity_val_12 = torch.mean(torch.abs(elasticity * (tmp_param - master_param)))
                             k += 1
                             new_param = param - elasticity * (tmp_param - master_param)
-                            new_master_param = master_param + mass * (tmp_param - master_param)
+                            new_master_param = master_param + elasticity * (tmp_param - master_param)
                             param.copy_(new_param)
                             master_param.copy_(new_master_param)
 
@@ -304,7 +304,6 @@ def main():
                     test_elasticity_0.append(test_elasticity_val_0.to('cpu'))
                     test_elasticity_12.append(test_elasticity_val_12.to('cpu'))
             if final:
-                rolling_return[i] = 0
                 episode_durations[i].append(episode_counter[i])
                 episode_counter[i] = 0
 
@@ -321,7 +320,7 @@ def main():
     # Close the env and write monitor result to disk
     [env.close() for env in environments]
     title = f'Asynch AESGD + DQN by AdamPaszke\n' \
-            f'agents: {N}, commute: {commute_t}, elasticity: {elasticity}, asym. after: {return_time}t, ' \
+            f'agents: {N}, commute: {commute_t}, elasticity: {elasticity}, ' \
             f'lr: {learning_rate}, gamma: {gamma}, batch: {batch_size}, clamp: {clamp}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
@@ -330,8 +329,8 @@ def main():
     fig, (ax0, ax1) = plt.subplots(1, 2)
     ax0.plot(test_grad_0, label='grad_0')
     ax0.plot(test_elasticity_0, label='elasticity_0')
-    ax1.plot(test_grad_12, label='grad_12')
-    ax1.plot(test_elasticity_12, label='elasticity_12')
+    ax1.plot(test_grad_12, label='grad_7')
+    ax1.plot(test_elasticity_12, label='elasticity_7')
     ax0.set_xlabel('elasticity updates')
     ax1.set_xlabel('elasticity updates')
     ax0.legend()
@@ -339,7 +338,7 @@ def main():
     plt.savefig(f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch grad.png')
 
     plot_results(episode_durations, epsilon, title, info, filename)
-    plt.show()
+    # plt.show()
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
