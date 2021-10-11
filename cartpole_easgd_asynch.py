@@ -187,7 +187,7 @@ def main():
             f'lr: {learning_rate}, gamma: {gamma}, batch: {batch_size}, 2l {weights}w'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_easgd_distributed_asynch/{time}_training_dist_asynch rand.png'
+    filename = f'./tmp_easgd_asynch/{time}_training_easgd_asynch rand.png'
     plot_results(episode_durations, epsilon, title, info, filename)
 
 
