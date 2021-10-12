@@ -1,0 +1,54 @@
+{
+  "sac_cartpole": {
+    "agent": [{
+      "name": "SoftActorCritic",
+      "algorithm": {
+        "name": "SoftActorCritic",
+        "action_pdtype": "GumbelSoftmax",
+        "action_policy": "epsilon_greedy",
+        "gamma": 0.99,
+        "training_frequency": 1
+      },
+      "memory": {
+        "name": "Replay",
+        "batch_size": 32,
+        "max_size": 10000,
+        "use_cer": true
+      },
+      "net": {
+        "type": "MLPNet",
+        "hid_layers": [64],
+        "hid_layers_activation": "relu",
+        "clip_grad_val": 1.0,
+        "loss_spec": {
+          "name": "MSELoss"
+        },
+        "optim_spec": {
+          "name": "SGD",
+          "lr": 0.02
+        },
+        "lr_scheduler_spec": null,
+        "update_type": "polyak",
+        "update_frequency": 32,
+        "polyak_coef": 0.1,
+        "gpu": false
+      }
+    }],
+    "env": [{
+      "name": "CartPole-v0",
+      "max_t": null,
+      "max_frame": 10000
+    }],
+    "body": {
+      "product": "outer",
+      "num": 1
+    },
+    "meta": {
+      "distributed": false,
+      "eval_frequency": 100,
+      "log_frequency": 100,
+      "max_session": 2,
+      "max_trial": 1
+    }
+  }
+}
