@@ -13,17 +13,15 @@ from PIL import Image
 
 from collections import namedtuple, deque
 from itertools import count
-
-from matplotlib import pyplot as plt
 from tqdm import tqdm
 from torch import from_numpy, as_tensor, float32, int64
 
 from drawing import plot_results
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # 'cpu' #
+device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-' # '-' #
 
-learning_rate = 0.01
+learning_rate = 0.001
 eps_0 = 1.0
 eps_min = 0.01
 eps_decay = 0.999
@@ -32,13 +30,8 @@ episode_count = 700
 batch_size = 128
 
 clamp = True
-elasticity = 0.1
+commute_t = 20
 N = 3
-commute_t = 1
-
-a = torch.Tensor((-2, -1, 0, 1, 2))
-print(a)
-print(F.relu(a))
 
 
 class DQN(nn.Module):
@@ -64,9 +57,9 @@ class DQN(nn.Module):
             nn.BatchNorm2d(32, affine=False),
         )
         self.head = nn.Sequential(
-            nn.Linear(linear_input_size, 30),
-            nn.ReLU(),
-            nn.Linear(30, outputs)
+            nn.Linear(linear_input_size, outputs),
+            # nn.ReLU(),
+            # nn.Linear(30, outputs)
         )
 
     # Called with either one element to determine next action, or a batch
@@ -135,7 +128,7 @@ def get_screen(env):
     screen = env.render(mode='rgb_array').transpose((2, 0, 1))
     # Cart is in the lower half, so strip off the top and bottom of the screen
     _, screen_height, screen_width = screen.shape
-    screen = screen[:, int(screen_height * 0.4):int(screen_height * 0.8)]
+    screen = screen[:, int(screen_height*0.4):int(screen_height * 0.8)]
     view_width = int(screen_width * 0.6)
     cart_location = get_cart_location(screen_width, env)
     if cart_location < view_width // 2:
@@ -158,7 +151,7 @@ def main():
     environments = []
     for i in range(0, N):
         env = gym.make('CartPole-v0')
-        # env = wrappers.Monitor(env, directory=f'./tmp_dqn_distributed_asynch/agent{i}', force=True)
+        # env = wrappers.Monitor(env, directory=f'./tmp_dqn_n_agents/agent{i}', force=True)
         env.reset()
         environments.append(env)
 
@@ -169,41 +162,23 @@ def main():
     mse_loss = nn.MSELoss()
     memory = [ReplayMemory() for _ in range(0, N)]
 
-    master = DQN(screen_height, screen_width, n_actions).to(device)
-    models = [DQN(screen_height, screen_width, n_actions).to(device) for _ in range(0, N)]
-    tmp = DQN(screen_height, screen_width, n_actions).to(device)
+    targets = [DQN(screen_height, screen_width, n_actions).to(device) for _ in range(0, N)]
+    policies = [DQN(screen_height, screen_width, n_actions).to(device) for _ in range(0, N)]
 
-    master.load_state_dict(models[0].state_dict())
+    for target, policy in zip(targets, policies):
+        target.load_state_dict(policy.state_dict())
 
-    # Replicated SGD style:
-    # with torch.no_grad():
-    #     for i in range(1, N):
-    #         for param, master_param in zip(models[i].parameters(), master.parameters()):
-    #             new_master_param = master_param + param
-    #             master_param.copy_(new_master_param)
-    #     for master_param in master.parameters():
-    #         master_param.divide_(N)
-
-    # AE SGD style:
-    for i in range(1, N):
-        models[i].load_state_dict(master.state_dict())
-
-    weights = sum(p.numel() for p in master.parameters())
-    print(f'{weights} weights, model: {master}')
+    weights = sum(p.numel() for p in targets[0].parameters())
+    print(f'{weights} weights, model: {targets[0]}')
     print(f'Using {device} device: {device_name}')
 
-    agents = [Agent(env.action_space, model, eps_0) for env, model in zip(environments, models)]
+    agents = [Agent(env.action_space, policy, eps_0) for env, policy in zip(environments, policies)]
     episode_durations = [[] for _ in range(0, N)]
     episode_counter = [0 for _ in range(0, N)]
-    test_grad_0 = []
-    test_grad_12 = []
-    test_elasticity_0 = []
-    test_elasticity_12 = []
     epsilon = []
     agent_states = []
     agent_screens = []
 
-    print(f'START: {datetime.now().strftime("%Y.%m.%d %H-%M-%S")}')
     for env in environments:
         env.reset()
 
@@ -213,11 +188,11 @@ def main():
         agent_states.append(state)
         agent_screens.append(current_screen)
 
-    # for t in tqdm(count()):
-    for t in count():
-        if len(episode_durations[0]) > episode_count \
-                or len(episode_durations[1]) > episode_count \
-                or len(episode_durations[2]) > episode_count:
+    for t in (count()):
+        if t > 0 and t % 500 == 0:
+            print(f'episodes: {len(episode_durations[0])}, mean score: {np.mean(episode_durations[0])}')
+
+        if len(episode_durations[0]) > episode_count:
             break
 
         for i in range(0, N):
@@ -225,8 +200,9 @@ def main():
             agent = agents[i]
             env = environments[i]
             state = agent_states[i]
-            model = models[i]
+            policy = policies[i]
             current_screen = agent_screens[i]
+            target = targets[i]
 
             action = agent.get_action(state)
             _, reward, final, _ = env.step(action)
@@ -253,56 +229,30 @@ def main():
 
                 non_final_next_states = torch.cat([s for s in batch.next_state if s is not None])
                 next_state_values = torch.zeros(batch_size, device=device)
-                next_state_values[non_final] = master(non_final_next_states).amax(dim=1)
-
-                tmp.load_state_dict(model.state_dict())
+                next_state_values[non_final] = target(non_final_next_states).amax(dim=1)
 
                 # q_update = r,  for final s'
                 #            r + gamma * max_a Q(s', :), otherwise
                 indices = torch.stack((actions, actions))
-                q_values = model(states).t().gather(0, indices)[0]
+                q_values = policy(states).t().gather(0, indices)[0]
+                # if commute_t is None:  #or rand init
                 q_update = rewards + non_final * gamma * next_state_values
+                # else:
+                #     q_update = rewards + non_final * gamma * master(next_states).amax(dim=1)
 
                 loss = mse_loss(q_values, q_update)
 
-                test_grad_val_0 = None
-                test_grad_val_12 = None
-                grad = torch.autograd.grad(outputs=loss, inputs=model.parameters())
+                grad = torch.autograd.grad(outputs=loss, inputs=policy.parameters())
                 with torch.no_grad():
-                    k = 0
-                    for param, param_grad in zip(model.parameters(), grad):
+                    for param, param_grad in zip(policy.parameters(), grad):
                         if clamp:
                             param_grad.data.clamp_(-1, 1)
                         new_param = param - learning_rate * param_grad
                         param.copy_(new_param)
-                        if k == 0:
-                            test_grad_val_0 = torch.mean(torch.abs(learning_rate * param_grad))
-                        if k == 7:
-                            test_grad_val_12 = torch.mean(torch.abs(learning_rate * param_grad))
-                        k += 1
-
-                test_elasticity_val_0 = None
-                test_elasticity_val_12 = None
-                if commute_t is not None and t % commute_t == 0:
-                    with torch.no_grad():
-                        k = 0
-                        for param, tmp_param, master_param in zip(model.parameters(), tmp.parameters(),
-                                                                  master.parameters()):
-                            if k == 0:
-                                test_elasticity_val_0 = torch.mean(torch.abs(elasticity * (tmp_param - master_param)))
-                            if k == 7:
-                                test_elasticity_val_12 = torch.mean(torch.abs(elasticity * (tmp_param - master_param)))
-                            k += 1
-                            new_param = param - elasticity * (tmp_param - master_param)
-                            new_master_param = master_param + elasticity * (tmp_param - master_param)
-                            param.copy_(new_param)
-                            master_param.copy_(new_master_param)
 
                 if commute_t is not None and t % commute_t == 0:
-                    test_grad_0.append(test_grad_val_0.to('cpu'))
-                    test_grad_12.append(test_grad_val_12.to('cpu'))
-                    test_elasticity_0.append(test_elasticity_val_0.to('cpu'))
-                    test_elasticity_12.append(test_elasticity_val_12.to('cpu'))
+                    target.load_state_dict(policy.state_dict())
+
             if final:
                 episode_durations[i].append(episode_counter[i])
                 episode_counter[i] = 0
@@ -319,26 +269,15 @@ def main():
 
     # Close the env and write monitor result to disk
     [env.close() for env in environments]
-    title = f'Asynch AESGD + DQN by AdamPaszke\n' \
-            f'agents: {N}, commute: {commute_t}, elasticity: {elasticity}, ' \
+    title = f'DQN by AdamPaszke, SGD \n' \
+            f'agents: {N}, commute: {commute_t}, ' \
             f'lr: {learning_rate}, gamma: {gamma}, batch: {batch_size}, clamp: {clamp}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch.png'
+    filename = f'./tmp_dqn_n_agents/{time}_dqn.png'
+    plot_results(episode_durations, epsilon, title, info, filename, cmap='BuGn')
 
-    fig, (ax0, ax1) = plt.subplots(1, 2)
-    ax0.plot(test_grad_0, label='grad_0')
-    ax0.plot(test_elasticity_0, label='elasticity_0')
-    ax1.plot(test_grad_12, label='grad_7')
-    ax1.plot(test_elasticity_12, label='elasticity_7')
-    ax0.set_xlabel('elasticity updates')
-    ax1.set_xlabel('elasticity updates')
-    ax0.legend()
-    ax1.legend()
-    plt.savefig(f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch grad.png')
 
-    plot_results(episode_durations, epsilon, title, info, filename)
-    # plt.show()
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
