@@ -2,7 +2,7 @@ from cycler import cycler
 import numpy as np
 import matplotlib.pyplot as plt
 
-plt.rcParams['font.sans-serif'] = 'Arial'
+# plt.rcParams['font.sans-serif'] = 'Arial'
 plt.rcParams['figure.figsize'] = (8, 4)
 plt.rcParams['axes.grid'] = True
 plt.rcParams['axes.grid.axis'] = 'both'
@@ -13,7 +13,7 @@ plt.rcParams['grid.linestyle'] = ':'
 plt.rcParams['grid.linewidth'] = 0.6
 
 
-def plot_result(score, epsilon, title, info, filename, mean_window=100):
+def plot_result(score, epsilon, title, info, filename, mean_window=50):
     running_average = np.convolve(score, np.ones(mean_window)/mean_window, mode='valid')
 
     fig, (ax0, ax1) = plt.subplots(1, 2)
@@ -50,6 +50,33 @@ def plot_results(scores, epsilon, title, info, filename, mean_window=100, cmap='
     ax1.plot(epsilon, color='tab:red')
     ax1.set(xlabel='Episode', ylabel='Epsilon', yscale='log')
     ax1.text(0.9, 0.9, info, va='top', ha='right', transform=ax1.transAxes)
+
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.show()
+
+
+def plot_result_frames(scores, epsilon, title, info, filename, mean_window=100, cmap='PuBu', learning_rate=None):
+    fig, (ax0, ax1) = plt.subplots(1, 2)
+    fig.suptitle(title)
+    colormap = plt.get_cmap(cmap)
+    colorcycler = cycler(color=[colormap(k) for k in np.linspace(0.4, 1, len(scores))])
+
+    ax0.set(xlabel='Frame', ylabel='Score')
+    ax0.set_prop_cycle(colorcycler)
+    for score in scores:
+        ax0.plot(score, alpha=0.7, lw=1)
+
+    for score in scores:
+        running_average = np.convolve(score, np.ones(mean_window) / mean_window, mode='valid')
+        ax0.plot(running_average, '#e24848', alpha=0.9, lw=1)
+
+    ax1.plot(epsilon, color='tab:red', label='epsilon')
+    ax1.set(xlabel='Frame')
+    if learning_rate is not None:
+        ax1.plot(learning_rate, color='tab:blue', label='learning rate')
+    ax1.text(0.9, 0.9, info, va='top', ha='right', transform=ax1.transAxes)
+    ax1.legend()
 
     plt.tight_layout()
     plt.savefig(filename)
