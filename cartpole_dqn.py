@@ -148,9 +148,9 @@ def main():
 
             optimizer.zero_grad()
             loss.backward()
-            if clamp:
-                for param_grad in model.parameters():
-                    param_grad.data.clamp_(-clamp, clamp)
+            # if clamp:                                     # there is a mistake here!
+            #     for param_grad in model.parameters():
+            #         param_grad.data.clamp_(-clamp, clamp)
             optimizer.step()
 
             if t % update_frequency == 0:
@@ -165,7 +165,7 @@ def main():
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
     filename = f'./tmp/{time}_training_qnn.png'
-    plot_result_frames([score], epsilon, title, info, filename, learning_rate=learning_rates)
+    plot_result_frames([score], epsilon, title, info, filename, lr=learning_rates)
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main

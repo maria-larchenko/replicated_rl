@@ -12,7 +12,7 @@ from torch import float32, int64
 
 from drawing import plot_result_frames
 
-seed = 75  # np.random.randint(low=0, high=2**10)  # 7, 8
+seed = 6  # np.random.randint(low=0, high=2**10)  # 7, 8
 torch.manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
@@ -30,7 +30,7 @@ max_frames = 10_000
 batch_size = 32
 update_frequency = 32
 polyak_coef = 0.1
-clamp = 0.5
+clamp = False
 units = 64
 
 
@@ -39,7 +39,7 @@ class DQN(nn.Module):
         super(DQN, self).__init__()
         self.model = nn.Sequential(
             nn.Linear(4, units),
-            nn.SELU(),
+            nn.ReLU(),
             nn.Linear(units, 2),
         )
         self.train()        # <----- SLM
@@ -50,21 +50,25 @@ class DQN(nn.Module):
 
 class Agent:
 
-    def __init__(self, action_space, model, eps_0, eps_min, eps_decay=0.0, N=1):
+    def __init__(self, action_space, model, eps_0, eps_min, eps_steps, eps_decay=0.0,):
         self.action_space = action_space
         self.model = model
+        self.N = eps_steps
         # linear
-        self.eps = eps_0 - (eps_0 - eps_min) / N * np.arange(0, N)
+        self.eps = eps_0 - (eps_0 - eps_min) / self.N * np.arange(0, self.N)
         # exponential
         if eps_decay != 0.0:
-            self.eps = np.full(N, eps_0) * np.full(N, eps_decay) ** np.arange(0, N)
+            self.eps = np.full(self.N, eps_0) * np.full(self.N, eps_decay) ** np.arange(0, self.N)
         self.eps = np.where(self.eps < eps_min, eps_min, self.eps)
+
+    def get_eps(self, frame):
+        n = frame if frame < self.N-1 else self.N-1
+        return self.eps[n]
 
     def get_action(self, state, frame):
         state = to_tensor(state)
         with torch.no_grad():    # for efficiency, only calc grad in algorithm.train
-            n = frame if frame < N-1 else N-1
-            if np.random.uniform() < self.eps[n]:
+            if np.random.uniform() < self.get_eps(frame):
                 return random.sample([0, 1], 1)[0]
                 # return self.action_space.sample()
                 # return random.sample(self.action_space, 1)
@@ -104,7 +108,8 @@ def main():
 
     memory = ReplayMemory()
     mse_loss = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     print(f'{sum(p.numel() for p in model.parameters())} weights, model: {model}')
     print(f'Using {device} device: {device_name}')
@@ -177,6 +182,9 @@ def main():
 
             optimizer.zero_grad()
             loss.backward()
+            if clamp:
+                for param_grad in model.parameters():
+                        param_grad.data.clamp_(-clamp, clamp)
             optimizer.step()
 
             if t % update_frequency == 0:
@@ -192,12 +200,12 @@ def main():
 
     env.close()
     print(f'episodes: {episodes}')
-    title = f'hidden units: {units}, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}, clamp: {clamp}: ' \
+    title = f'hidden units: {units}(relu), batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}, clamp: {clamp}: ' \
             f'polyak: {polyak_coef}, seed: {seed}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
     filename = f'./tmp/{time}_training_qnn{slm}.png'
-    plot_result_frames([score], epsilon, title, info, filename, learning_rate=learning_rates)
+    plot_result_frames([score], epsilon, title, info, filename, lr=learning_rates)
     # np.savetxt(f'weights{slm}.txt', weights)
 
 
