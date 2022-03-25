@@ -75,8 +75,9 @@ def plot_result_frames(scores, epsilon, title, info, filename,
         ax0.plot(master_score, color='tab:green', label='master', lw=1)
     ax0.legend(loc='lower right')
 
-    ax1.plot(epsilon, color='tab:red', label='epsilon')
     ax1.set(xlabel='Frame')
+    if epsilon is not None:
+        ax1.plot(epsilon, color='tab:red', label='epsilon')
     if lr is not None:
         ax1.plot(lr, color='tab:blue', label='learning rate')
     ax1.text(0.9, 0.7, info, va='top', ha='right', transform=ax1.transAxes)
