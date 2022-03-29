@@ -26,7 +26,7 @@ hidden = 254
 gamma = 0.99
 max_frames = 50_000
 avg_frames = 1000
-batch_size = 20
+batch_size = 32
 
 
 def to_tensor(x, dtype=float32):
