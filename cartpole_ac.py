@@ -17,7 +17,7 @@ random.seed(seed)
 np.random.seed(seed)
 torch.manual_seed(seed)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu') # torch.device('cpu')  #
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # torch.device('cpu')  #
 device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  # 'cpu'  #
 
 lr_v = 0.01
@@ -104,7 +104,6 @@ def main():
 
     value_net = ValueNet().to(device)
     policy_net = PolicyNet().to(device)
-    mse_loss = nn.MSELoss()
 
     memory = ReplayMemory()
     # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
@@ -147,20 +146,8 @@ def main():
             rewards = to_tensor(batch.reward)
             next_states = to_tensor(batch.next_state)
             finals = to_tensor(batch.final)
-            # print(f"rewards: {rewards}")
-            # print(f"value_net(states): {value_net(states)}")
-            # print(f"value_net(next_states): {value_net(next_states)}")
-            # print(f"gamma * value_net(next_states): {gamma * value_net(next_states)}")
-            # print(f"finals: {finals}")
-            # print(f"gamma * value_net(next_states) - value_net(states): {gamma * value_net(next_states) - value_net(states)}")
-            # print(f"ADVANCE: {rewards + (1- finals) * gamma * value_net(next_states) - value_net(states)}")
-            # indices = torch.stack((actions, actions))
-            # print(f"actions: {actions}")
-            # print(f"policy_net(states): {policy_net(states)}")
-            # print(f"indices: {indices}")
-            # print(f"policy_net(states).T.gather(0, indices): {policy_net(states).T.gather(0, indices)}")
-            # print(f"policy_net(states).T.gather(0, indices)[0]: {policy_net(states).T.gather(0, indices)[0]}")
-            # exit()
+
+            # 1-step Actor-Critic
             # ----------- gradient step 1: CRITIC
             advance = rewards + (1 - finals) * gamma * value_net(next_states) - value_net(states)
             critic_loss = (1/2 * advance ** 2).mean()
@@ -182,7 +169,7 @@ def main():
     title = f'hidden: {hidden}, batch: {batch_size}, lr_v: {lr_v}, lr_pi: {lr_pi}, gamma: {gamma}, softmax, seed: {seed}'
     # info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_ac/{time}_training.png'
+    filename = f'./output/tmp_ac/{time}_training.png'
     plot_result_frames([score], None, title, None, filename, lr=None, mean_window=avg_frames)
 
 

@@ -164,7 +164,7 @@ def main():
     title = f'{weights} weights, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}, clamp: {clamp}: polyak: {polyak_coef}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp/{time}_training_qnn.png'
+    filename = f'./output/tmp/{time}_training_qnn.png'
     plot_result_frames([score], epsilon, title, info, filename, lr=learning_rates)
 
 

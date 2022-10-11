@@ -204,7 +204,7 @@ def main():
             f'polyak: {polyak_coef}, seed: {seed}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp/{time}_training_qnn{slm}.png'
+    filename = f'./output/tmp/{time}_training_qnn{slm}.png'
     plot_result_frames([score], epsilon, title, info, filename, lr=learning_rates)
     # np.savetxt(f'weights{slm}.txt', weights)
 

@@ -154,7 +154,7 @@ def main():
     environments = []
     for i in range(0, N):
         env = gym.make('CartPole-v0')
-        # env = wrappers.Monitor(env, directory=f'./tmp_dqn_distributed_asynch/agent{i}', force=True)
+        # env = wrappers.Monitor(env, directory=f'./output/tmp_dqn_distributed_asynch/agent{i}', force=True)
         env.reset()
         environments.append(env)
 
@@ -327,7 +327,7 @@ def main():
             f'lr: {learning_rate}, gamma: {gamma}, batch: {batch_size}, clamp: {clamp}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch.png'
+    filename = f'./output/tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch.png'
 
     fig, (ax0, ax1) = plt.subplots(1, 2)
     ax0.plot(test_grad_0, label='grad_0')
@@ -338,7 +338,7 @@ def main():
     ax1.set_xlabel('elasticity updates')
     ax0.legend()
     ax1.legend()
-    plt.savefig(f'./tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch grad.png')
+    plt.savefig(f'./output/tmp_dqn_easgd_asynch/{time}_dqn_easgd_asynch grad.png')
 
     plot_results(episode_durations, epsilon, title, info, filename)
     # plt.show()

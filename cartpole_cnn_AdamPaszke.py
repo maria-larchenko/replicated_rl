@@ -65,7 +65,7 @@ import torchvision.transforms as T
 from gym import wrappers
 
 env = gym.make('CartPole-v0')
-env = wrappers.Monitor(env, directory='./tmp_dqn', force=True)
+env = wrappers.Monitor(env, directory='./output/tmp_dqn', force=True)
 
 # # set up matplotlib
 # is_ipython = 'inline' in matplotlib.get_backend()
@@ -488,7 +488,7 @@ print('Complete')
 env.render()
 env.close()
 plt.ioff()
-plt.savefig(f'./tmp_dqn/{datetime.now().strftime("%Y.%m.%d %H-%M")}_training.png')
+plt.savefig(f'./output/tmp_dqn/{datetime.now().strftime("%Y.%m.%d %H-%M")}_training.png')
 plt.show()
 
 ######################################################################

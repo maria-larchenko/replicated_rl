@@ -25,7 +25,6 @@ eps_0 = 1.0
 eps_min = 0.1
 eps_decay = 0.0
 eps_steps = 1000
-momentum = 0.99  # Nesterov scheme
 gamma = 0.99
 max_frames = 10_000
 batch_size = 32
@@ -139,7 +138,7 @@ def main():
     print(f'{sum(p.numel() for p in master.parameters())} weights, model: {master}')
     print(f'Using {device} device: {device_name}')
 
-    # agents number can be N+1 - the last model will be master model
+    # number of agents is N+1 - the last model will be master model
     environments = [gym.make('CartPole-v0') for _ in range(0, len(models))]
     for env in environments:
         env.seed(seed)
@@ -222,7 +221,7 @@ def main():
     [env.close() for env in environments]
     type = 'easgd_asynch' if elasticity else 'polyak'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_easgd_asynch/{time}_training_{type}.png'
+    filename = f'./output/tmp_easgd_asynch/{time}_training_{type}.png'
     title = f'{"Asynch EASGD" if elasticity else "Polyak Update"}\n' \
             f'agents: {N}, ' \
             f'update_frequency: {update_frequency}, ' \

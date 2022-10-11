@@ -72,7 +72,7 @@ class Session:
         title = f'SLM DQN seed: {seed}'
         info = f''
         time = datetime.now().strftime("%Y.%m.%d %H-%M")
-        filename = f'./tmp/{time}_training_SLM.png'
+        filename = f'./output/tmp/{time}_training_SLM.png'
         plot_result_frames([score], epsilon, title, info, filename, learning_rate=learning_rate)
 
     def close(self):

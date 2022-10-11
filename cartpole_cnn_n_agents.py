@@ -151,7 +151,7 @@ def main():
     environments = []
     for i in range(0, N):
         env = gym.make('CartPole-v0')
-        # env = wrappers.Monitor(env, directory=f'./tmp_dqn_n_agents/agent{i}', force=True)
+        # env = wrappers.Monitor(env, directory=f'./output/tmp_dqn_n_agents/agent{i}', force=True)
         env.reset()
         environments.append(env)
 
@@ -274,7 +274,7 @@ def main():
             f'lr: {learning_rate}, gamma: {gamma}, batch: {batch_size}, clamp: {clamp}'
     info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
     time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./tmp_dqn_n_agents/{time}_dqn.png'
+    filename = f'./output/tmp_dqn_n_agents/{time}_dqn.png'
     plot_results(episode_durations, epsilon, title, info, filename, cmap='BuGn')
 
 
