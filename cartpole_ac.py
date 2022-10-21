@@ -22,7 +22,7 @@ device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_availab
 
 lr_v = 0.01
 lr_pi = 0.01
-hidden = 254
+hidden = 256
 gamma = 0.99
 max_frames = 50_000
 avg_frames = 1000
@@ -59,7 +59,7 @@ class PolicyNet(nn.Module):
             nn.Linear(self.hidden, self.hidden),
             nn.ReLU(),
             nn.Linear(self.hidden, 2),
-            nn.Softmax(),
+            nn.Softmax(dim=0),
         )
 
     def forward(self, x):
