@@ -20,9 +20,9 @@ torch.manual_seed(seed)
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
 
-lr_v = 0.001
-lr_pi = 0.001
-hidden = 254
+lr_v = 0.01
+lr_pi = 0.01
+hidden = 256
 capacity = 200
 gamma = 0.99
 max_frames = 50_000
@@ -66,7 +66,7 @@ class PolicyNet(nn.Module):
             nn.Linear(self.hidden, self.hidden),
             nn.ReLU(),
             nn.Linear(self.hidden, 2),
-            nn.Softmax(),
+            nn.Softmax(dim=0),
         )
 
     def forward(self, x):
@@ -112,23 +112,23 @@ class EpisodicMemory:
     def clear(self):
         self.memory = deque([], maxlen=self.capacity)
 
+    def pop(self):
+        return self.memory.pop()
+
     def __len__(self):
         return len(self.memory)
 
 
 def main():
     print(f"SEED: {seed}")
-
     global_value_net = ValueNet().to(device)
     global_policy_net = PolicyNet().to(device)
     value_net = ValueNet().to(device)
     policy_net = PolicyNet().to(device)
 
     memory = EpisodicMemory(capacity=capacity)
-    weights = sum(p.numel() for p in policy_net.parameters())
-    print(f'{weights} weights, model: {policy_net}')
+    print(f'model: {policy_net}')
     print(f'Using {device} device: {device_name}')
-
     env = gym.make('CartPole-v0')
     env.seed(seed)
     agent = Agent(env.action_space, policy_net)
@@ -140,8 +140,8 @@ def main():
     T = 0
 
     while T < max_frames:
-        grad_value = value_net.zeros_like()
-        grad_policy = policy_net.zeros_like()
+        value_grad = value_net.zeros_like()
+        policy_grad = policy_net.zeros_like()
         value_net.load_state_dict(global_value_net.state_dict())
         policy_net.load_state_dict(global_policy_net.state_dict())
         state = env.reset()
@@ -154,34 +154,44 @@ def main():
             memory.push(state, action, next_state, reward, final)
             state = next_state
 
-            current_score += 1
             score[T] = prev_score
+            current_score += 1
             T += 1
+
             if final:
                 prev_score = current_score
                 current_score = 0
                 episodes += 1
 
+        if T % 10 == 0: print(f'T: {T}, score: {prev_score}')
+
         # Advantage Actor-Critic: A(s, a) = Q(s, a) - V(s) = r + V(s') - V(s)
-        last_transition = memory.memory.pop()
+        memory_length = len(memory)
+        last_transition = memory.pop()
         retain_graph = not last_transition.final
         R = 0 if last_transition.final else value_net(to_tensor(last_transition.state))
         for transition in reversed(memory.memory):
             s = to_tensor(transition.state)
             a = transition.action
             r = to_tensor(transition.reward)
-            R += r + gamma * R
+            R = r + gamma * R
             # ----------- accumulate gradients: ACTOR
             actor_loss = - torch.log(policy_net(s)[a]) * (R - value_net(s))
-            grad_policy += torch.autograd.grad(actor_loss, policy_net.parameters())
+            actor_grad = torch.autograd.grad(actor_loss, policy_net.parameters())
+            with torch.no_grad():
+                for accumulated_grad, grad in zip(policy_grad, actor_grad):
+                    accumulated_grad += grad / memory_length
             # ----------- accumulate gradients: CRITIC
             critic_loss = (R - value_net(s)) ** 2
-            grad_value += torch.autograd.grad(critic_loss, value_net.parameters(), retain_graph=retain_graph)
+            critic_grad = torch.autograd.grad(critic_loss, value_net.parameters(), retain_graph=retain_graph)
+            with torch.no_grad():
+                for accumulated_grad, grad in zip(value_grad, critic_grad):
+                    accumulated_grad += grad / memory_length
         # ----------- Asynch Update global nets
         with torch.no_grad():
-            for param, param_grad in zip(value_net.parameters(), grad_value):
+            for param, param_grad in zip(global_value_net.parameters(), value_grad):
                 param.copy_(param - lr_v * param_grad)
-            for param, param_grad in zip(policy_net.parameters(), grad_policy):
+            for param, param_grad in zip(global_policy_net.parameters(), policy_grad):
                 param.copy_(param - lr_pi * param_grad)
 
     env.close()
