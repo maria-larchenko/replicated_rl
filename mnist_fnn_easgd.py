@@ -20,8 +20,8 @@ seed = 73  # np.random.randint(low=0, high=2**10)
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-device = 'cpu'  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
 
 learning_rate = 1e-1 * 20
 epochs = 10

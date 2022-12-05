@@ -6,22 +6,29 @@ import torch
 import torch.nn as nn
 import random
 
+from multiprocessing import Manager, Pool
 from collections import namedtuple, deque
 from tqdm import tqdm
 from torch import float32, int64
 
-from drawing import plot_result_frames
+from drawing import plot_results, plot_result_frames
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+seed = 1  # np.random.randint(10_000)
+device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
+device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
 
-learning_rate = 0.02
+processes = 8
+agents = 4
+
+lr = 0.02
+hidden = 64
 eps_0 = 1.0
 eps_min = 0.1
+eps_steps = 1000
 eps_decay = 0.0
-N = 1000
 gamma = 0.99
 max_frames = 10_000
+avg_frames = 1_000
 batch_size = 32
 update_frequency = 32
 polyak_coef = 0.1
@@ -31,11 +38,20 @@ clamp = 1.0
 class DQN(nn.Module):
     def __init__(self):
         super(DQN, self).__init__()
+        self.hidden = hidden
+        # self.model = nn.Sequential(
+        #     nn.Linear(4, units),
+        #     nn.SELU(),
+        #     nn.Linear(units, 2),
+        # )
         self.model = nn.Sequential(
-            nn.Linear(4, 32),
-            nn.ReLU(),
-            nn.Linear(32, 2),
+            nn.Linear(4, self.hidden),
+            nn.SELU(),
+            nn.Linear(self.hidden, self.hidden),
+            nn.SELU(),
+            nn.Linear(self.hidden, 2),
         )
+        self.train()
 
     def forward(self, x):
         return self.model(x)
@@ -43,22 +59,27 @@ class DQN(nn.Module):
 
 class Agent:
 
-    def __init__(self, action_space, model, eps_0, eps_min, eps_decay=0.0, N=1):
-        self.action_space = action_space
+    def __init__(self, action_space, model, eps_0, eps_min, eps_steps, eps_decay=0.0, seed=None):
+        self.action_space = np.arange(0, action_space.n)
         self.model = model
+        self.N = eps_steps
         # linear
-        self.eps = eps_0 - (eps_0 - eps_min) / N * np.arange(0, N)
+        self.eps = eps_0 - (eps_0 - eps_min) / self.N * np.arange(0, self.N)
         # exponential
         if eps_decay != 0.0:
-            self.eps = np.full(N, eps_0) * np.full(N, eps_decay) ** np.arange(0, N)
+            self.eps = np.full(self.N, eps_0) * np.full(self.N, eps_decay) ** np.arange(0, self.N)
         self.eps = np.where(self.eps < eps_min, eps_min, self.eps)
+        self._rng = np.random.default_rng(seed)
+
+    def get_eps(self, frame):
+        n = frame if frame < self.N-1 else self.N-1
+        return self.eps[n]
 
     def get_action(self, state, frame):
         state = to_tensor(state)
-        with torch.no_grad():
-            n = frame if frame < N-1 else N-1
-            if np.random.uniform() < self.eps[n]:
-                return self.action_space.sample()
+        with torch.no_grad():    # for efficiency, only calc grad in algorithm.train
+            if self._rng.uniform() < self.get_eps(frame):
+                return self._rng.choice(self.action_space)
             else:
                 return self.model(state).argmax().item()
 
@@ -87,21 +108,31 @@ def to_tensor(x, dtype=float32):
     return torch.as_tensor(x, dtype=dtype).to(device)
 
 
-def main():
+def main(agent_number):
+    local_seed = agent_number + seed
+    torch.manual_seed(local_seed)
+    torch.cuda.manual_seed(local_seed)
+    torch.cuda.manual_seed_all(local_seed)
+    np.random.seed(local_seed)
+    random.seed(local_seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
     model = DQN().to(device)
     target = DQN().to(device)
     target.load_state_dict(model.state_dict())
 
     memory = ReplayMemory()
     mse_loss = nn.MSELoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
-    
-    weights = sum(p.numel() for p in model.parameters())
-    print(f'{weights} weights, model: {model}')
-    print(f'Using {device} device: {device_name}')
+    optimizer = torch.optim.SGD(model.parameters(), lr=lr)
+    #
+    # weights = sum(p.numel() for p in model.parameters())
+    # print(f'{weights} weights, model: {model}')
+    # print(f'Using {device} device: {device_name}')
 
     env = gym.make('CartPole-v0')
-    agent = Agent(env.action_space, model, eps_0, eps_min, eps_decay, N)
+    env.seed(local_seed)
+    agent = Agent(env.action_space, model, eps_0, eps_min, eps_steps, eps_decay, local_seed)
     score = np.zeros(max_frames)
     epsilon = np.zeros(max_frames)
     learning_rates = np.zeros(max_frames)
@@ -112,7 +143,8 @@ def main():
     episodes = 0
     state = env.reset()
 
-    for t in tqdm(range(max_frames)):
+    # for t in tqdm(range(max_frames)):
+    for t in range(max_frames):
         if final:
             prev_score = current_score
             current_score = 0
@@ -125,7 +157,7 @@ def main():
 
         current_score += 1
         score[t] = prev_score
-        epsilon[t] = agent.eps[t if t < N-1 else N-1]  # test
+        epsilon[t] = agent.get_eps(t)  # test
         learning_rates[t] = optimizer.param_groups[0]['lr']
 
         if len(memory) > batch_size:
@@ -160,14 +192,38 @@ def main():
                         target_param.copy_(new_param)
 
     env.close()
-    print(f'episodes: {episodes}')
-    title = f'{weights} weights, batch: {batch_size}, lr: {learning_rate}, gamma: {gamma}, clamp: {clamp}: polyak: {polyak_coef}'
-    info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
-    time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./output/tmp/{time}_training_qnn.png'
-    plot_result_frames([score], epsilon, title, info, filename, lr=learning_rates)
+    return episodes, score, epsilon
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
 if __name__ == '__main__':
-    main()
+    # main()
+
+    print(f"MULTIPROCESSING DQN, processes: {processes}")
+    print(f"SEED: {seed}")
+
+    with Manager() as manager, Pool(processes=processes) as pool:
+        print(f"------------------------------------ started: {datetime.now().strftime('%H-%M-%S')}")
+        pool_args = [(agent, ) for agent in range(agents)]
+        agent_results = pool.starmap(main, pool_args)  # [(episodes, score, eps), (episodes, score, eps)]
+        print(f"------------------------------------ finished: {datetime.now().strftime('%H-%M-%S')}")
+
+        episodes = [result[0] for result in agent_results]
+        scores = [result[1] for result in agent_results]
+        epsilons = [result[2] for result in agent_results]
+        print(f"played episodes: {episodes}")
+
+        title = f'DQN {agents} agents\n ' \
+                f'hidden: {hidden}(selu), ' \
+                f'batch: {batch_size}, ' \
+                f'lr: {lr}, ' \
+                f'gamma: {gamma}, ' \
+                f'polyak: {polyak_coef}, ' \
+                f'freq: {update_frequency}, ' \
+                f'seed: {seed}'
+        info = f'eps: {eps_0}\n min: {eps_min}\n decay: {eps_decay}'
+        timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
+        filename = f'./output/tmp_dqn_elastic/{timestamp}_dqn_{agents}.png'
+        plot_result_frames(scores, epsilon=epsilons[0], title=title, info=info,
+                           filename=filename, lr=lr, mean_window=avg_frames)
+

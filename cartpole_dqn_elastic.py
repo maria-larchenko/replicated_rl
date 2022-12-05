@@ -12,42 +12,50 @@ from torch import from_numpy, as_tensor, float32, int64
 
 from drawing import plot_results, plot_result_frames
 
-seed = 6  # np.random.randint(low=0, high=2**10)  # 7, 8
+seed = 1  # np.random.randint(10_000)
 torch.manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
+device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
 
-learning_rate = 0.02
+learning_rate = 0.01
 eps_0 = 1.0
 eps_min = 0.1
 eps_decay = 0.0
-eps_steps = 1000
+eps_steps = 5000
 gamma = 0.99
 max_frames = 10_000
 batch_size = 32
 clamp = False
-units = 64
-unit_type = 'selu'
-mean_window = 500
+hidden = 64
+mean_window = 1000
 
 draw_master = False
-N = 2
-update_frequency = 5
-# choose only one:
-elasticity = False     # 2 x learning rate ? ~ 1 / agents
-polyak_coef = 0.95
+N = 4
+update_frequency = 10  # 32
+
+# choose only one coef, another should be set to 0
+elasticity = 0.05      # 0.1 |  2 x learning rate ? ~ 1 / agents
+polyak_coef = 0        # 0.1
 
 
 class DQN(nn.Module):
     def __init__(self):
         super().__init__()
+        self.hidden = hidden
+        # self.model = nn.Sequential(
+        #     nn.Linear(4, units),
+        #     nn.SELU(),
+        #     nn.Linear(units, 2),
+        # )
         self.model = nn.Sequential(
-            nn.Linear(4, units),
+            nn.Linear(4, self.hidden),
             nn.SELU(),
-            nn.Linear(units, 2),
+            nn.Linear(self.hidden, self.hidden),
+            nn.SELU(),
+            nn.Linear(self.hidden, 2),
         )
         self.train()
 
@@ -169,7 +177,7 @@ def main():
 
             action = agent.get_action(state, t)
             next_state, reward, final, _ = env.step(action)
-            if i != N:
+            if i != N:      # <---- no memory for master model
                 memory[i].push(state.astype(np.float16), action, next_state.astype(np.float16), reward, int(not final))
             agent_states[i] = next_state
             finals[i] = final
@@ -188,7 +196,8 @@ def main():
                 next_states = to_tensor(batch.next_state)
                 non_finals = to_tensor(batch.non_final)
 
-                tmp.load_state_dict(model.state_dict())
+                if t % update_frequency == 0 and elasticity > 0:
+                    tmp.load_state_dict(model.state_dict())
 
                 indices = torch.stack((actions, actions))
                 q_values = model(states).t().gather(0, indices)[0]
@@ -205,29 +214,27 @@ def main():
                     for param, param_grad in zip(model.parameters(), grad):
                         param.copy_(param - learning_rate * param_grad)
 
-                if t % update_frequency == 0 and elasticity:
+                if t % update_frequency == 0 and elasticity > 0:  # ---------------- elastic update:
                     with torch.no_grad():
                         for param, tmp_param, master_param in zip(model.parameters(), tmp.parameters(),
                                                                   master.parameters()):
                             param.copy_(param - elasticity * (tmp_param - master_param))
                             master_param.copy_(master_param + elasticity * (tmp_param - master_param))
 
-                if t % update_frequency == 0 and polyak_coef:  # ---------------- SLM polyak update:
+                if t % update_frequency == 0 and polyak_coef > 0:  # ---------------- SLM polyak update:
                     with torch.no_grad():
                         for model_param, master_param in zip(model.parameters(), master.parameters()):
-                            # master_param.copy_(polyak_coef * model_param + (1 - polyak_coef) * master_param)
                             master_param.copy_(master_param + polyak_coef * (model_param - master_param))
 
     [env.close() for env in environments]
-    type = 'easgd_asynch' if elasticity else 'polyak'
-    time = datetime.now().strftime("%Y.%m.%d %H-%M")
-    filename = f'./output/tmp_easgd_asynch/{time}_training_{type}.png'
-    title = f'{"Asynch EASGD" if elasticity else "Polyak Update"}\n' \
-            f'agents: {N}, ' \
+    type = 'elastic' if elasticity else 'polyak'
+    time = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
+    filename = f'./output/tmp_dqn_elastic/{time}_dqn_{type}.png'
+    title = f'{f"DQN Elastic {N} agents" if elasticity else f"DQN Polyak {N} agents"}\n' \
             f'update_frequency: {update_frequency}, ' \
             f'elasticity: {elasticity}, ' \
             f'polyak_coef: {polyak_coef},\n ' \
-            f'hidden units: {units}({unit_type}), ' \
+            f'hidden: {hidden}(selu), ' \
             f'batch: {batch_size}, ' \
             f'lr: {learning_rate}, ' \
             f'gamma: {gamma}, ' \
