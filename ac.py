@@ -6,97 +6,40 @@ import torch
 import torch.nn as nn
 import random
 
-from collections import namedtuple, deque
 from tqdm import tqdm
 from torch import float32, int64
 
+from classes.Agents import AcAgent
+from classes.Memory import ReplayMemory
+from classes.Models import ValueNet, PolicyNet
 from drawing import plot_result_frames
 from multiprocessing import Manager, Pool
 
 seed = 333  # np.random.randint(10_000)
-
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-processes = 5
-
-lr = 0.01
+# env
+env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
+env_actions = 4
+env_state_dim = 8
+# params
+lr = 0.001
 hidden = 256
 gamma = 0.99
-max_frames = 10_000
+max_frames = 50_000
 avg_frames = 1000
 batch_size = 32
-agents = 5
+processes = 5
+agents = 3
 
 
 def to_tensor(x, dtype=float32):
     return torch.as_tensor(x, dtype=dtype).to(device)
 
 
-class ValueNet(nn.Module):
-    def __init__(self):
-        super(ValueNet, self).__init__()
-        self.hidden = hidden
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 1),
-        )
-
-    def forward(self, x):
-        return self.model(x).reshape(batch_size)
-
-
-class PolicyNet(nn.Module):
-    def __init__(self):
-        self.hidden = hidden
-        super(PolicyNet, self).__init__()
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 2),
-            nn.Softmax(),
-        )
-
-    def forward(self, x):
-        return self.model(x)
-
-
-class Agent:
-
-    def __init__(self, action_space, model, seed=None):
-        self.action_space = np.arange(0, action_space.n)
-        self.model = model
-        self._rng = np.random.default_rng(seed)
-
-    def get_action(self, state):
-        state = to_tensor(state)
-        prob = self.model(state).cpu().detach().numpy()
-        with torch.no_grad():
-            return self._rng.choice(self.action_space, p=prob)
-
-
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'final'))
-
-
-class ReplayMemory:
-
-    def __init__(self, capacity=10000):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        transitions = random.sample(self.memory, batch_size)
-        # Transpose the batch of Transitions to Transition of batch, see https://stackoverflow.com/a/19343/3343043.
-        return Transition(*zip(*transitions))
-
-    def __len__(self):
-        return len(self.memory)
+def print_progress(agent_number, message):
+    if agent_number == 0:
+        print(message)
 
 
 def main(agent_number):
@@ -109,20 +52,19 @@ def main(agent_number):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    value_net = ValueNet().to(device)
-    policy_net = PolicyNet().to(device)
+    value_net = ValueNet(env_state_dim, hidden).to(device)
+    policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
     memory = ReplayMemory()
-    env = gym.make('CartPole-v0')
-    env.seed(local_seed)
-    agent = Agent(env.action_space, policy_net, local_seed)
+    env = gym.make(env_name)
+    agent = AcAgent(env.action_space, policy_net, local_seed)
 
     score = np.zeros(max_frames)
     final = False
     current_score = 0
     prev_score = 0
     episodes = 0
-    state = env.reset()
+    state = env.reset(seed=local_seed)[0]
 
     # for t in tqdm(range(max_frames)):
     for t in range(max_frames):
@@ -130,9 +72,9 @@ def main(agent_number):
             prev_score = current_score
             current_score = 0
             episodes += 1
-            state = env.reset()
+            state = env.reset()[0]
         action = agent.get_action(state)
-        next_state, reward, final, _ = env.step(action)
+        next_state, reward, final, _, _ = env.step(action)
         memory.push(state, action, next_state, reward, final)
         state = next_state
 
@@ -163,6 +105,8 @@ def main(agent_number):
             with torch.no_grad():
                 for param, param_grad in zip(policy_net.parameters(), actor_grad):
                     param.copy_(param - lr * param_grad)
+            if t % 100 == 0:
+                print_progress(agent_number, f"score: {prev_score}, C-loss: {critic_loss}, A-loss: {actor_loss}")
 
     env.close()
     return episodes, score
@@ -174,16 +118,16 @@ if __name__ == '__main__':
     print(f"SEED: {seed}")
 
     with Manager() as manager, Pool(processes=processes) as pool:
-        print(f"------------------------------------ started: {datetime.now().strftime('%H-%M-%S')}")
+        print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
         pool_args = [(agent,) for agent in range(agents)]
         agent_results = pool.starmap(main, pool_args)  # [(episodes, score, eps), (episodes, score, eps)]
-        print(f"------------------------------------ finished: {datetime.now().strftime('%H-%M-%S')}")
+        print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
 
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
         print(f"played episodes: {episodes}")
 
-        title = f'AC {agents} agents\n' \
+        title = f'{env_name} AC {agents} agents\n' \
                 f'hidden: {hidden}(selu), ' \
                 f'batch: {batch_size}, ' \
                 f'lr: {lr}, ' \
@@ -191,7 +135,7 @@ if __name__ == '__main__':
                 f'softmax, ' \
                 f'seed: {seed}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/tmp_ac/{timestamp}_ac_{agents}.png'
+        filename = f'./output/ac/{timestamp}_ac_{agents}.png'
         plot_result_frames(scores, epsilon=None, title=title, info=None,
                            filename=filename, lr=lr, mean_window=avg_frames)
 

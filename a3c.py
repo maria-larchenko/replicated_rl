@@ -1,5 +1,4 @@
 import random
-from collections import namedtuple, deque
 from datetime import datetime
 from multiprocessing import Manager, Pool
 
@@ -9,22 +8,27 @@ import torch
 import torch.nn as nn
 from torch import float32
 
+from classes.Agents import AcAgent
+from classes.Memory import BackwardMemory
+from classes.Models import ValueNet, PolicyNet
 from drawing import plot_result_frames
 
-# Seed
-seed = 333  # np.random.randint(10_000)
+
+seed = np.random.randint(10_000)
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-
+# env
+env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
+env_actions = 4
+env_state_dim = 8
 # params
-lr = 0.01
-hidden = 64
-capacity = 200
+lr = 0.001
+hidden = 512
 gamma = 0.99
-max_frames = 10_000
+max_frames = 50_000
 avg_frames = 1000
-processes = 8
-agents = 5
+processes = 3
+agents = 3
 
 
 def to_tensor(x, dtype=float32):
@@ -36,90 +40,8 @@ def print_progress(agent_number, message):
         print(message)
 
 
-class ValueNet(nn.Module):
-    def __init__(self):
-        super(ValueNet, self).__init__()
-        self.hidden = hidden
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 1),
-        )
-
-    def forward(self, x):
-        # return self.model(x).reshape(batch_size)
-        return self.model(x)
-
-    def zeros_like(self):
-        zeros = []
-        for p in self.parameters():
-            zeros.append(torch.zeros_like(p))
-        return zeros
-
-
-class PolicyNet(nn.Module):
-    def __init__(self):
-        super(PolicyNet, self).__init__()
-        self.hidden = hidden
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 2),
-            nn.Softmax(dim=0),
-        )
-
-    def forward(self, x):
-        return self.model(x)
-
-    def zeros_like(self):
-        zeros = []
-        for p in self.parameters():
-            zeros.append(torch.zeros_like(p))
-        return zeros
-
-
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'final'))
-
-
-class EpisodicMemory:
-
-    def __init__(self, capacity=10000):
-        self.capacity = capacity
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def clear(self):
-        self.memory = deque([], maxlen=self.capacity)
-
-    def pop(self):
-        return self.memory.pop()
-
-    def __len__(self):
-        return len(self.memory)
-
-
-class Agent:
-
-    def __init__(self, action_space, model, seed=None):
-        self.action_space = np.arange(0, action_space.n)
-        self._rng = np.random.default_rng(seed)
-        self.model = model
-
-    def get_action(self, state):
-        state = to_tensor(state)
-        prob = self.model(state).cpu().detach().numpy()
-        with torch.no_grad():
-            return self._rng.choice(self.action_space, p=prob)
-
-
-def main(number, global_value_net, global_policy_net, update_lock):
-    local_seed = number + seed
+def main(agent_number, global_value_net, global_policy_net, update_lock):
+    local_seed = agent_number + seed
     # print_progress(number, f"agent: {number}, local seed: {local_seed}")
     torch.manual_seed(local_seed)
     torch.cuda.manual_seed(local_seed)
@@ -129,13 +51,12 @@ def main(number, global_value_net, global_policy_net, update_lock):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    value_net = ValueNet().to(device)
-    policy_net = PolicyNet().to(device)
+    value_net = ValueNet(env_state_dim, hidden).to(device)
+    policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
-    memory = EpisodicMemory(capacity=capacity)
-    env = gym.make('CartPole-v0')
-    env.seed(local_seed)
-    agent = Agent(env.action_space, policy_net, local_seed)
+    memory = BackwardMemory()
+    env = gym.make(env_name)
+    agent = AcAgent(env.action_space, policy_net, local_seed)
     score = np.zeros(max_frames)
 
     current_score = 0
@@ -159,19 +80,18 @@ def main(number, global_value_net, global_policy_net, update_lock):
         #     if episodes == 3:
         #         env.close()
         #         return episodes, score
-
         value_grad = value_net.zeros_like()
         policy_grad = policy_net.zeros_like()
         value_net.load_state_dict(global_value_net.state_dict())
         policy_net.load_state_dict(global_policy_net.state_dict())
-        state = env.reset()
+        state = env.reset(seed=local_seed)[0]
         final = False
         memory.clear()
         # actions = []
 
         while not final and T < max_frames:
             action = agent.get_action(state)
-            next_state, reward, final, _ = env.step(action)
+            next_state, reward, final, _, _ = env.step(action)
             memory.push(state, action, next_state, reward, final)
             state = next_state
 
@@ -184,9 +104,6 @@ def main(number, global_value_net, global_policy_net, update_lock):
                 prev_score = current_score
                 current_score = 0
                 episodes += 1
-        if T % 10 == 0:
-            print_progress(number, f"score: {prev_score}")
-
         # Advantage Actor-Critic: A(s, a) = Q(s, a) - V(s) = r + V(s') - V(s)
         memory_length = len(memory)
         last_transition = memory.pop()
@@ -216,6 +133,7 @@ def main(number, global_value_net, global_policy_net, update_lock):
                     param.copy_(param - lr / memory_length * param_grad)
                 for param, param_grad in zip(global_policy_net.parameters(), policy_grad):
                     param.copy_(param - lr / memory_length * param_grad)
+        print_progress(agent_number, f"score: {prev_score}, C-loss: {critic_loss}, A-loss: {actor_loss}")
 
     env.close()
     return episodes, score
@@ -232,26 +150,25 @@ if __name__ == '__main__':
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    global_value_net = ValueNet().to(device)
-    global_policy_net = PolicyNet().to(device)
+    global_value_net = ValueNet(env_state_dim, hidden).to(device)
+    global_policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
     with Manager() as manager, Pool(processes=processes) as pool:
         update_lock = manager.Lock()
-
-        print(f"------------------------------------ started: {datetime.now().strftime('%H-%M-%S')}")
+        print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
         pool_args = [(agent, global_value_net, global_policy_net, update_lock)
                      for agent in range(agents)]
         agent_results = pool.starmap(main, pool_args)  # [(episodes, score), (episodes, score)]
-        print(f"------------------------------------ finished: {datetime.now().strftime('%H-%M-%S')}")
+        print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
 
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
         print(f"played episodes: {episodes}")
 
-        title = f'A3C {agents} agents\n ' \
+        title = f'{env_name} A3C {agents} agents\n ' \
                 f'hidden: {hidden}(selu), batch: episode, lr: {lr}, gamma: {gamma}, softmax, seed: {seed}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/tmp_a3c/{timestamp}_a3c_{agents}.png'
+        filename = f'./output/a3c/{timestamp}_a3c_{agents}.png'
 
         plot_result_frames(scores, epsilon=None, title=title, info=None,
                            filename=filename, lr=None, mean_window=avg_frames)

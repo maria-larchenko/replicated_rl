@@ -10,6 +10,9 @@ from collections import namedtuple, deque
 from tqdm import tqdm
 from torch import from_numpy, as_tensor, float32, int64
 
+from classes.Agents import DqnAgent
+from classes.Memory import ReplayMemory
+from classes.Models import DQN
 from drawing import plot_results, plot_result_frames
 
 seed = 1  # np.random.randint(10_000)
@@ -41,78 +44,6 @@ elasticity = 0.05      # 0.1 |  2 x learning rate ? ~ 1 / agents
 polyak_coef = 0        # 0.1
 
 
-class DQN(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.hidden = hidden
-        # self.model = nn.Sequential(
-        #     nn.Linear(4, units),
-        #     nn.SELU(),
-        #     nn.Linear(units, 2),
-        # )
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 2),
-        )
-        self.train()
-
-    # x could be a single state or a batch
-    def forward(self, x):
-        return self.model(x)
-
-
-class Agent:
-
-    def __init__(self, action_space, model, eps_0, eps_min, eps_steps, eps_decay=0.0,):
-        self.action_space = action_space
-        self.model = model
-        self.N = eps_steps
-        # linear
-        self.eps = eps_0 - (eps_0 - eps_min) / self.N * np.arange(0, self.N)
-        # exponential
-        if eps_decay != 0.0:
-            self.eps = np.full(self.N, eps_0) * np.full(self.N, eps_decay) ** np.arange(0, self.N)
-        self.eps = np.where(self.eps < eps_min, eps_min, self.eps)
-
-    def get_eps(self, frame):
-        n = frame if frame < self.N-1 else self.N-1
-        return self.eps[n]
-
-    def get_action(self, state, frame):
-        state = to_tensor(state)
-        with torch.no_grad():    # for efficiency, only calc grad in algorithm.train
-            if np.random.uniform() < self.get_eps(frame):
-                return random.sample([0, 1], 1)[0]
-                # return self.action_space.sample()
-                # return random.sample(self.action_space, 1)
-            else:
-                return self.model(state).argmax().item()
-
-
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'non_final'))
-
-
-class ReplayMemory:
-    """From https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html"""
-
-    def __init__(self, capacity=10000):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        transitions = random.sample(self.memory, batch_size)
-        # Transpose the batch of Transitions to Transition of batch, see https://stackoverflow.com/a/19343/3343043.
-        return Transition(*zip(*transitions))
-
-    def __len__(self):
-        return len(self.memory)
-
-
 def to_tensor(x, dtype=float32):
     return as_tensor(x, dtype=dtype).to(device)
 
@@ -121,13 +52,13 @@ def main():
     mse_loss = nn.MSELoss()
     memory = [ReplayMemory() for _ in range(0, N)]
 
-    master = DQN().to(device)
-    models = [DQN().to(device) for _ in range(0, N)]
+    master = DQN(4, hidden, 2).to(device)
+    models = [DQN(4, hidden, 2).to(device) for _ in range(0, N)]
 
     if draw_master:
         models.append(master)
 
-    tmp = DQN().to(device)
+    tmp = DQN(4, hidden, 2).to(device)
 
     # # AESGD init:
     # for model in models:
@@ -148,9 +79,9 @@ def main():
 
     # number of agents is N+1 - the last model will be master model
     environments = [gym.make('CartPole-v0') for _ in range(0, len(models))]
-    for env in environments:
-        env.seed(seed)
-    agents = [Agent(env.action_space, model, eps_0, eps_min, eps_steps) for env, model in zip(environments, models)]
+    agents = [DqnAgent(env.action_space, model) for env, model in zip(environments, models)]
+    for agent in agents:
+        agent.set_linear_epsilon(eps_0, eps_min, eps_steps)
     agent_states = [env.reset() for env in environments]
     finals = [False for _ in range(0, len(models))]
     current_scores = [0 for _ in range(0, len(models))]

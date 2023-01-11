@@ -3,13 +3,13 @@ from datetime import datetime
 import gym
 import numpy as np
 import torch
-import torch.nn as nn
 import random
 
-from collections import namedtuple, deque
-from tqdm import tqdm
 from torch import float32, int64
 
+from classes.Agents import AcAgent
+from classes.Memory import ReplayMemory
+from classes.Models import ValueNet, PolicyNet
 from drawing import plot_result_frames
 from multiprocessing import Manager, Pool
 
@@ -17,90 +17,42 @@ seed = 333  # np.random.randint(10_000)
 
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-processes = 5
-
-lr = 0.05
-hidden = 64
+# env
+env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
+env_actions = 4
+env_state_dim = 8
+# params
+lr = 0.0001
+hidden = 256
 gamma = 0.99
 max_frames = 10_000
 avg_frames = 1000
 batch_size = 64
+processes = 3
+agents = 3
 
-agents = 5
 update_frequency = 32  # 32
-stat_elasticity = 0.01
-draw_master = False
+rho = 1.0
+elastic_type = 'max'  # max, Dkl
 
 
 def to_tensor(x, dtype=float32):
     return torch.as_tensor(x, dtype=dtype).to(device)
 
 
-class ValueNet(nn.Module):
-    def __init__(self):
-        super(ValueNet, self).__init__()
-        self.hidden = hidden
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 1),
-        )
-
-    def forward(self, x):
-        return self.model(x).reshape(batch_size)
+def distance_max(states, model, master_model):
+    return torch.max(torch.abs(master_model(states) - model(states)))
 
 
-class PolicyNet(nn.Module):
-    def __init__(self):
-        self.hidden = hidden
-        super(PolicyNet, self).__init__()
-        self.model = nn.Sequential(
-            nn.Linear(4, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, self.hidden),
-            nn.SELU(),
-            nn.Linear(self.hidden, 2),
-            nn.Softmax(),
-        )
-
-    def forward(self, x):
-        return self.model(x)
+def divergence(states, model, master_model):
+    p = master_model(states)
+    q = model(states)
+    return torch.sum(p * torch.log(p / q))
 
 
-class Agent:
-
-    def __init__(self, action_space, model, seed=None):
-        self.action_space = np.arange(0, action_space.n)
-        self.model = model
-        self._rng = np.random.default_rng(seed)
-
-    def get_action(self, state):
-        state = to_tensor(state)
-        prob = self.model(state).cpu().detach().numpy()
-        with torch.no_grad():
-            return self._rng.choice(self.action_space, p=prob)
-
-
-Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'final'))
-
-
-class ReplayMemory:
-
-    def __init__(self, capacity=10000):
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def sample(self, batch_size):
-        transitions = random.sample(self.memory, batch_size)
-        # Transpose the batch of Transitions to Transition of batch, see https://stackoverflow.com/a/19343/3343043.
-        return Transition(*zip(*transitions))
-
-    def __len__(self):
-        return len(self.memory)
+def print_progress(agent_number, message):
+    if agent_number == 0:
+        print(message)
 
 
 def main(agent_number, global_value_net, global_policy_net, update_lock):
@@ -113,36 +65,34 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    value_net = ValueNet().to(device)
-    policy_net = PolicyNet().to(device)
+    value_net = ValueNet(env_state_dim, hidden).to(device)
+    policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
-    tmp_value_net = ValueNet().to(device)
-    tmp_policy_net = PolicyNet().to(device)
+    tmp_value_net = ValueNet(env_state_dim, hidden).to(device)
+    tmp_policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
-    if stat_elasticity > 0:
-        value_net.load_state_dict(global_value_net.state_dict())
-        policy_net.load_state_dict(global_policy_net.state_dict())
+    value_net.load_state_dict(global_value_net.state_dict())
+    policy_net.load_state_dict(global_policy_net.state_dict())
 
     memory = ReplayMemory()
-    env = gym.make('CartPole-v0')
-    env.seed(local_seed)
-    agent = Agent(env.action_space, policy_net, local_seed)
+    env = gym.make(env_name)
+    agent = AcAgent(env.action_space, policy_net, local_seed)
 
     score = np.zeros(max_frames)
     final = False
     current_score = 0
     prev_score = 0
     episodes = 0
-    state = env.reset()
+    state = env.reset(seed=local_seed)[0]
 
     for t in range(max_frames):
         if final:
             prev_score = current_score
             current_score = 0
             episodes += 1
-            state = env.reset()
+            state = env.reset()[0]
         action = agent.get_action(state)
-        next_state, reward, final, _ = env.step(action)
+        next_state, reward, final, _, _ = env.step(action)
         memory.push(state, action, next_state, reward, final)
         state = next_state
 
@@ -174,28 +124,32 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                 for param, param_grad in zip(policy_net.parameters(), actor_grad):
                     param.copy_(param - lr * param_grad)
 
-            if t % update_frequency == 0 and stat_elasticity > 0:  # ---------------- elastic update:
+            if t % update_frequency == 0:  # ---------------- elastic update:
                 with update_lock:
                     tmp_value_net.load_state_dict(global_value_net.state_dict())
                     tmp_policy_net.load_state_dict(global_policy_net.state_dict())
-
-                    stat_distance_value = torch.max(torch.abs(value_net(states) - tmp_value_net(states)))
-                    stat_distance_policy = torch.max(torch.abs(policy_net(states) - tmp_policy_net(states)))
-
-                    grad_dist_value = torch.autograd.grad(stat_distance_value, value_net.parameters())
-                    grad_dist_policy = torch.autograd.grad(stat_distance_policy, policy_net.parameters())
-
+                    if elastic_type == 'max':
+                        distance_value = distance_max(states, value_net, tmp_value_net)
+                        distance_policy = distance_max(states, policy_net, tmp_policy_net)
+                    elif elastic_type == 'Dkl':
+                        distance_value = divergence(states, value_net, tmp_value_net)
+                        distance_policy = divergence(states, policy_net, tmp_policy_net)
+                    grad_dist_value = torch.autograd.grad(distance_value, value_net.parameters())
+                    grad_dist_policy = torch.autograd.grad(distance_policy, policy_net.parameters())
+                    elasticity_v = 0 if torch.isnan(distance_value) else lr * critic_loss/distance_value * rho
+                    elasticity_p = 0 if torch.isnan(distance_policy) else lr * actor_loss/distance_policy * rho
                     with torch.no_grad():
                         for param, master_param, grad_distance in zip(value_net.parameters(),
                                                                       global_value_net.parameters(), grad_dist_value):
-                            param.copy_(param - stat_elasticity * grad_distance)
-                            master_param.copy_(master_param + stat_elasticity * grad_distance)
-
+                            param.copy_(param - elasticity_v * grad_distance)
+                            master_param.copy_(master_param + elasticity_v * grad_distance)
                         for param, master_param, grad_distance in zip(policy_net.parameters(),
                                                                       global_policy_net.parameters(), grad_dist_policy):
-                            param.copy_(param - stat_elasticity * grad_distance)
-                            master_param.copy_(master_param + stat_elasticity * grad_distance)
-
+                            param.copy_(param - elasticity_p * grad_distance)
+                            master_param.copy_(master_param + elasticity_p * grad_distance)
+                    print_progress(agent_number, f"score: {prev_score}, C-loss: {critic_loss}, A-loss: {actor_loss}, "
+                                   f"elasticity_v: {elasticity_v}, elasticity_p: {elasticity_p}, "
+                                   f"distance_v: {distance_value}, distance_p: {distance_policy}")
     env.close()
     return episodes, score
 
@@ -212,16 +166,16 @@ if __name__ == '__main__':
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    global_value_net = ValueNet().to(device)
-    global_policy_net = PolicyNet().to(device)
+    global_value_net = ValueNet(env_state_dim, hidden).to(device)
+    global_policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
     with Manager() as manager, Pool(processes=processes) as pool:
         update_lock = manager.Lock()
 
-        print(f"------------------------------------ started: {datetime.now().strftime('%H-%M-%S')}")
+        print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
         pool_args = [(agent, global_value_net, global_policy_net, update_lock) for agent in range(agents)]
         agent_results = pool.starmap(main, pool_args)  # [(episodes, score), (episodes, score)]
-        print(f"------------------------------------ finished: {datetime.now().strftime('%H-%M-%S')}")
+        print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
 
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
@@ -229,7 +183,7 @@ if __name__ == '__main__':
 
         title = f'AC Stat. Elastic {agents} agents (asynch)\n' \
                 f'update_frequency: {update_frequency}, ' \
-                f'stat_elasticity: {stat_elasticity}, \n' \
+                f'stat_elasticity: lr*loss/dist, \n' \
                 f'hidden: {hidden}(selu), ' \
                 f'batch: {batch_size}, ' \
                 f'lr: {lr}, ' \
@@ -237,6 +191,6 @@ if __name__ == '__main__':
                 f'softmax, ' \
                 f'seed: {seed}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/tmp_ac/{timestamp}_ac_stat_elastic_{agents}.png'
+        filename = f'./output/ac_elastic/{timestamp}_ac_stat_elastic_{agents}.png'
         plot_result_frames(scores, epsilon=None, title=title, info=None,
                            filename=filename, lr=lr, mean_window=avg_frames)
