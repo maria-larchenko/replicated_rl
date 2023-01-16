@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import random
 
+from gym.wrappers import TimeLimit
 from torch import float32, int64
 
 from classes.Agents import AcAgent
@@ -13,20 +14,22 @@ from classes.Models import ValueNet, PolicyNet
 from drawing import plot_result_frames
 from multiprocessing import Manager, Pool
 
-seed = 1  # np.random.randint(10_000)
+seed = np.random.randint(10_000)
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-# env
+
 env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
 env_actions = 4
 env_state_dim = 8
-# params
+
 lr = 0.001
 hidden = 256
 gamma = 0.99
-max_frames = 10_000
+max_frames = 50_000
+max_episode_steps = 500
 avg_frames = 1000
 batch_size = 64
+clamp = 1e-08
 processes = 3
 agents = 3
 
@@ -35,12 +38,12 @@ elasticity = 0.1
 
 
 def to_tensor(x, dtype=float32):
-    return torch.as_tensor(x, dtype=dtype).to(device)
+    return torch.as_tensor(np.array(x), dtype=dtype).to(device)
 
 
-def print_progress(agent_number, message):
-    if agent_number == 0:
-        print(message)
+def print_progress(agent_number, message, filter=True):
+    if not filter or agent_number == 0:
+        print(f"[{agent_number}]::" + message)
 
 
 def main(agent_number, global_value_net, global_policy_net, update_lock):
@@ -63,8 +66,9 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
         value_net.load_state_dict(global_value_net.state_dict())
         policy_net.load_state_dict(global_policy_net.state_dict())
 
-    memory = ReplayMemory()
-    env = gym.make(env_name)
+    memory = ReplayMemory(seed=local_seed)
+    # env = TimeLimit(gym.make(env_name, render_mode='human'), max_episode_steps=max_episode_steps)
+    env = TimeLimit(gym.make(env_name), max_episode_steps=max_episode_steps)
     agent = AcAgent(env.action_space, policy_net, local_seed)
 
     score = np.zeros(max_frames)
@@ -72,64 +76,77 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     current_score = 0
     prev_score = 0
     episodes = 0
-    state = env.reset(seed=local_seed)[0]
+    state, info = env.reset(seed=local_seed)
 
-    for t in range(max_frames):
-        if final:
-            prev_score = current_score
-            current_score = 0
-            episodes += 1
-            state = env.reset()[0]
-        action = agent.get_action(state)
-        next_state, reward, final, _, _ = env.step(action)
-        memory.push(state, action, next_state, reward, final)
-        state = next_state
+    try:
+        for t in range(max_frames):
+            if final:
+                prev_score = current_score
+                current_score = 0
+                episodes += 1
+                state, info = env.reset()
+            action = agent.get_action(state)
+            next_state, reward, final, terminated, _ = env.step(action)
+            memory.push(state, action, next_state, reward, final)
+            state = next_state
 
-        current_score += 1
-        score[t] = prev_score
-        if len(memory) > batch_size:
-            batch = memory.sample(batch_size)
-            states = to_tensor(batch.state)
-            actions = to_tensor(batch.action, dtype=int64)
-            rewards = to_tensor(batch.reward)
-            next_states = to_tensor(batch.next_state)
-            finals = to_tensor(batch.final)
+            current_score += reward
+            score[t] = prev_score
 
-            if t % update_frequency == 0 and elasticity > 0:
-                tmp_value_net.load_state_dict(value_net.state_dict())
-                tmp_policy_net.load_state_dict(policy_net.state_dict())
+            if len(memory) > batch_size:
+                batch = memory.sample(batch_size)
+                states = to_tensor(batch.state)
+                actions = to_tensor(batch.action, dtype=int64)
+                rewards = to_tensor(batch.reward)
+                next_states = to_tensor(batch.next_state)
+                finals = to_tensor(batch.final)
 
-            # 1-step Actor-Critic
-            # ----------- gradient step 1: CRITIC
-            advance = rewards + (1 - finals) * gamma * value_net(next_states) - value_net(states)
-            critic_loss = (1 / 2 * advance ** 2).mean()
-            critic_grad = torch.autograd.grad(critic_loss, value_net.parameters())
-            with torch.no_grad():
-                for param, param_grad in zip(value_net.parameters(), critic_grad):
-                    param.copy_(param - lr * param_grad)
-            # ----------- gradient step 2: ACTOR
-            indices = torch.stack((actions, actions))
-            act_prob = policy_net(states).T.gather(0, indices)[0]
-            actor_loss = (- advance * torch.log(act_prob)).mean()
-            actor_grad = torch.autograd.grad(actor_loss, policy_net.parameters())
-            with torch.no_grad():
-                for param, param_grad in zip(policy_net.parameters(), actor_grad):
-                    param.copy_(param - lr * param_grad)
+                if t % update_frequency == 0 and elasticity > 0:
+                    tmp_value_net.load_state_dict(value_net.state_dict())
+                    tmp_policy_net.load_state_dict(policy_net.state_dict())
 
-            if t % update_frequency == 0:  # ---------------- elastic update:
-                distances = []
-                with update_lock:
-                    with torch.no_grad():
-                        for param, tmp_param, master_param in zip(value_net.parameters(), tmp_value_net.parameters(),
-                                                                  global_value_net.parameters()):
-                            distances.append(torch.mean(tmp_param - master_param))
-                            param.copy_(param - elasticity * (tmp_param - master_param))
-                            master_param.copy_(master_param + elasticity * (tmp_param - master_param))
-                        for param, tmp_param, master_param in zip(policy_net.parameters(), tmp_policy_net.parameters(),
-                                                                  global_policy_net.parameters()):
-                            param.copy_(param - elasticity * (tmp_param - master_param))
-                            master_param.copy_(master_param + elasticity * (tmp_param - master_param))
-                print_progress(agent_number, f"score: {prev_score}, C-loss: {critic_loss}, A-loss: {actor_loss}, distances: {distances}")
+                # ----------- gradient step 1: CRITIC
+                advance = rewards + (1 - finals) * gamma * value_net(next_states).T - value_net(states).T
+                critic_loss = (1 / 2 * advance ** 2).mean()
+                critic_grad = torch.autograd.grad(critic_loss, value_net.parameters())
+                with torch.no_grad():
+                    for param, param_grad in zip(value_net.parameters(), critic_grad):
+                        if clamp:
+                            param_grad.data.clamp_(-clamp, clamp)
+                        param.copy_(param - lr * param_grad)
+                # ----------- gradient step 2: ACTOR
+                indices = torch.stack((actions, actions))
+                act_prob = policy_net(states).T.gather(0, indices)[0]
+                actor_loss = (- advance * torch.log(act_prob)).mean()
+                actor_grad = torch.autograd.grad(actor_loss, policy_net.parameters())
+                with torch.no_grad():
+                    for param, param_grad in zip(policy_net.parameters(), actor_grad):
+                        if clamp:
+                            param_grad.data.clamp_(-clamp, clamp)
+                        param.copy_(param - lr * param_grad)
+
+                if t % update_frequency == 0:  # ---------------- elastic update:
+                    distances = 0
+                    with update_lock:
+                        with torch.no_grad():
+                            for param, tmp_param, master_param in zip(value_net.parameters(), tmp_value_net.parameters(),
+                                                                      global_value_net.parameters()):
+                                distances += torch.mean(tmp_param - master_param)
+                                param.copy_(param - elasticity * (tmp_param - master_param))
+                                master_param.copy_(master_param + elasticity * (tmp_param - master_param))
+                            for param, tmp_param, master_param in zip(policy_net.parameters(), tmp_policy_net.parameters(),
+                                                                      global_policy_net.parameters()):
+                                param.copy_(param - elasticity * (tmp_param - master_param))
+                                master_param.copy_(master_param + elasticity * (tmp_param - master_param))
+                    print_progress(agent_number, f"{t}/{max_frames}| score: {prev_score}, "
+                                                 f"critic_loss: {float(critic_loss)}, "
+                                                 f"actor_loss: {float(actor_loss)}, "
+                                                 f"param_grad: {torch.mean(param_grad)},"
+                                                 f"distances: {float(distances)}")
+    except ValueError as error:
+        msg = f"{t}/{max_frames}| score: {prev_score}, critic_loss: {float(critic_loss)}, actor_loss: {float(actor_loss)} distances: {float(distances)}, act_prob: {agent.prob}"
+        print_progress(agent_number, str(error), filter=False)
+        print_progress(agent_number, msg, filter=False)
     env.close()
     return episodes, score
 
@@ -153,20 +170,20 @@ if __name__ == '__main__':
         update_lock = manager.Lock()
         print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
         pool_args = [(agent, global_value_net, global_policy_net, update_lock) for agent in range(agents)]
-        agent_results = pool.starmap(main, pool_args)  # [(episodes, score), (episodes, score)]
+        agent_results = pool.starmap(main, pool_args)
         print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
         print(f"played episodes: {episodes}")
 
-        title = f'{env_name} AC Elastic {agents} agents (asynch)\n' \
+        title = f'{env_name} {max_episode_steps} AC Elastic {agents} agents\n' \
                 f'update_frequency: {update_frequency}, ' \
                 f'elasticity: {elasticity}, \n' \
                 f'hidden: {hidden}(selu), ' \
                 f'batch: {batch_size}, ' \
                 f'lr: {lr}, ' \
                 f'gamma: {gamma}, ' \
-                f'softmax, ' \
+                f'clamp: {clamp}' \
                 f'seed: {seed}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
         filename = f'./output/ac_elastic/{timestamp}_ac_elastic_{agents}.png'

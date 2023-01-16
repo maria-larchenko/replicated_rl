@@ -12,21 +12,23 @@ from classes.Agents import AcAgent
 from classes.Memory import BackwardMemory
 from classes.Models import ValueNet, PolicyNet
 from drawing import plot_result_frames
-
+from gym.wrappers import TimeLimit
 
 seed = np.random.randint(10_000)
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-# env
+
 env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
 env_actions = 4
 env_state_dim = 8
-# params
-lr = 0.001
-hidden = 512
+save_model = False
+
+lr = 0.005
+hidden = 256
 gamma = 0.99
-max_frames = 50_000
-avg_frames = 1000
+max_frames = 100_000
+max_episode_steps = 500
+avg_frames = 1_000
 processes = 3
 agents = 3
 
@@ -42,7 +44,6 @@ def print_progress(agent_number, message):
 
 def main(agent_number, global_value_net, global_policy_net, update_lock):
     local_seed = agent_number + seed
-    # print_progress(number, f"agent: {number}, local seed: {local_seed}")
     torch.manual_seed(local_seed)
     torch.cuda.manual_seed(local_seed)
     torch.cuda.manual_seed_all(local_seed)
@@ -55,55 +56,42 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
     memory = BackwardMemory()
-    env = gym.make(env_name)
+    # env = TimeLimit(gym.make(env_name, render_mode='human'), max_episode_steps=max_episode_steps)
+    env = TimeLimit(gym.make(env_name), max_episode_steps=max_episode_steps)
     agent = AcAgent(env.action_space, policy_net, local_seed)
+    state = env.reset(seed=local_seed)[0]
     score = np.zeros(max_frames)
-
-    current_score = 0
-    prev_score = 0
     episodes = 0
+    current_score = 0
+    previous_score = 0
     T = 0
 
     while T < max_frames:
-        # if 0 < episodes and episodes % 10 == 0:
-        #     actions_str = ''
-        #     for a in actions:
-        #         actions_str += str(a)
-        #     print(f"agent: {number} episode {episodes}, policy_net: {policy_net.state_dict()['model.4.bias']}\n")
-        #     print(f"agent: {number} episode {episodes}, actions: {actions_str}\n")
-        # if T > 0 and episodes < 4:
-        #     actions_str = ''
-        #     for a in actions:
-        #         actions_str += str(a)
-        #     print(f"agent: {number} episode {episodes}, policy_net: {policy_net.state_dict()['model.4.bias']}\n")
-        #     print(f"agent: {number} episode {episodes}, actions: {actions_str}\n")
-        #     if episodes == 3:
-        #         env.close()
-        #         return episodes, score
         value_grad = value_net.zeros_like()
         policy_grad = policy_net.zeros_like()
         value_net.load_state_dict(global_value_net.state_dict())
         policy_net.load_state_dict(global_policy_net.state_dict())
-        state = env.reset(seed=local_seed)[0]
-        final = False
         memory.clear()
+        final = False
+        truncated = False
         # actions = []
 
-        while not final and T < max_frames:
+        while not (final or truncated) and T < max_frames:
             action = agent.get_action(state)
-            next_state, reward, final, _, _ = env.step(action)
+            next_state, reward, final, truncated, _ = env.step(action)
             memory.push(state, action, next_state, reward, final)
             state = next_state
 
-            score[T] = prev_score
-            current_score += 1
+            current_score += reward
+            score[T] = previous_score
+
             T += 1
             # actions.append(action)
+        state = env.reset()[0]
+        episodes += 1
+        previous_score = current_score
+        current_score = 0
 
-            if final:
-                prev_score = current_score
-                current_score = 0
-                episodes += 1
         # Advantage Actor-Critic: A(s, a) = Q(s, a) - V(s) = r + V(s') - V(s)
         memory_length = len(memory)
         last_transition = memory.pop()
@@ -133,7 +121,8 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                     param.copy_(param - lr / memory_length * param_grad)
                 for param, param_grad in zip(global_policy_net.parameters(), policy_grad):
                     param.copy_(param - lr / memory_length * param_grad)
-        print_progress(agent_number, f"score: {prev_score}, C-loss: {critic_loss}, A-loss: {actor_loss}")
+        print_progress(agent_number, f"{T}/{max_frames}| score: {current_score}, "
+                                     f"critic_loss: {float(critic_loss)}, actor_loss: {float(actor_loss)}")
 
     env.close()
     return episodes, score
@@ -165,12 +154,14 @@ if __name__ == '__main__':
         scores = [result[1] for result in agent_results]
         print(f"played episodes: {episodes}")
 
-        title = f'{env_name} A3C {agents} agents\n ' \
+        title = f'{env_name} {max_episode_steps} A3C {agents} agents\n ' \
                 f'hidden: {hidden}(selu), batch: episode, lr: {lr}, gamma: {gamma}, softmax, seed: {seed}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/a3c/{timestamp}_a3c_{agents}.png'
-
+        filename = f'./output/a3c/{timestamp}_a3c_{agents}'
+        if save_model:
+            torch.save(global_value_net.state_dict(), filename + '_V.pth')
+            torch.save(global_policy_net.state_dict(), filename + '_pi.pth')
         plot_result_frames(scores, epsilon=None, title=title, info=None,
-                           filename=filename, lr=None, mean_window=avg_frames)
+                           filename=filename+'.png', lr=None, mean_window=avg_frames)
 
 

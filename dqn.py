@@ -17,23 +17,24 @@ from gym.wrappers import TimeLimit
 seed = 1  # np.random.randint(10_000)
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-# env
-env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
+
+env_name = 'LunarLander-v2' #'LunarLander-v2'  # LunarLander-v2 CartPole-v1
 env_actions = 4
 env_state_dim = 8
-# params
+
 processes = 1
 agents = 1
+save_model = True
 
 lr = 0.001
-hidden = 256
+hidden = 512
 eps_0 = 1.0
 eps_min = 0.1
 eps_steps = 40_000
 eps_decay = 0.0
 gamma = 0.99
-max_frames = 100_000
-max_episode_steps = 1_000
+max_frames = 50_000
+max_episode_steps = 500
 avg_frames = 1_000
 batch_size = 128
 update_frequency = 32
@@ -42,7 +43,7 @@ clamp = 1.0
 
 
 def to_tensor(x, dtype=float32):
-    return torch.as_tensor(x, dtype=dtype).to(device)
+    return torch.as_tensor(np.array(x), dtype=dtype).to(device)
 
 
 def print_progress(agent_number, message):
@@ -64,18 +65,19 @@ def main(agent_number):
     target = DQN(env_state_dim, hidden, env_actions).to(device)
     target.load_state_dict(model.state_dict())
 
-    memory = ReplayMemory()
+    memory = ReplayMemory(seed=local_seed)
     mse_loss = nn.MSELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
     # weights = sum(p.numel() for p in model.parameters())
     # print(f'{weights} weights, model: {model}')
     # print(f'Using {device} device: {device_name}')
 
-    env = TimeLimit(gym.make(env_name, render_mode="human"), max_episode_steps=max_episode_steps)
+    # env = TimeLimit(gym.make(env_name, render_mode="human"), max_episode_steps=max_episode_steps)
+    env = TimeLimit(gym.make(env_name), max_episode_steps=max_episode_steps)
 
     agent = DqnAgent(env.action_space, model, local_seed)
     agent.set_lin_greediness(eps_0, eps_min, eps_steps)
-    # agent.set_softmax_greediness()
+    agent.set_softmax_greediness()
     score = np.zeros(max_frames)
     epsilon = np.zeros(max_frames)
     learning_rates = np.zeros(max_frames)
@@ -83,21 +85,23 @@ def main(agent_number):
     final = False
     truncated = False
     current_score = 0
+    prev_score = 0
     episodes = 0
     state, _ = env.reset(seed=local_seed)
 
     for t in range(max_frames):
         if final or truncated:
+            prev_score = current_score
             current_score = 0
             episodes += 1
             state, _ = env.reset()
-        action = agent.get_action(state, t)
+        action = agent.get_action(state)
         next_state, reward, final, truncated, _ = env.step(action)
         memory.push(state, action, next_state, reward, final)
         state = next_state
 
         current_score += reward
-        score[t] = current_score
+        score[t] = prev_score
         epsilon[t] = agent.get_greediness()
         learning_rates[t] = optimizer.param_groups[0]['lr']
 
@@ -130,7 +134,7 @@ def main(agent_number):
                     for model_param, target_param in zip(model.parameters(), target.parameters()):
                         new_param = polyak_coef * model_param + (1 - polyak_coef) * target_param
                         target_param.copy_(new_param)
-                print_progress(agent_number, f"t:{t}/{max_frames}| score: {current_score}, loss: {loss}")
+                print_progress(agent_number, f"{t}/{max_frames}| score: {current_score}, loss: {loss}")
     env.close()
     return episodes, score, epsilon, agent
 
@@ -162,9 +166,11 @@ if __name__ == '__main__':
                 f'seed: {seed}'
         info = agent_objs[0].get_eps_info()
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/dqn/{timestamp}_dqn_{agents}.png'
+        filename = f'./output/dqn/{timestamp}_dqn_{agents}'
+        if save_model:
+            torch.save(agent_objs[0].model.state_dict(), filename+'.pth')
         plot_result_frames(scores, epsilon=epsilons[0], title=title, info=info,
-                           filename=filename, lr=lr, mean_window=avg_frames)
+                           filename=filename+'.png', lr=lr, mean_window=avg_frames)
 
 
 

@@ -11,6 +11,7 @@ class Agent:
         self.model = model
         self.device = device
         self.dtype = dtype
+        self.prob = None
         if device is None:
             self.device = torch.device('cpu')
         if seed is not None:
@@ -31,6 +32,7 @@ class AcAgent(Agent):
     def get_action(self, state, *args):
         state = self.to_tensor(state)
         prob = self.model(state).cpu().detach().numpy()
+        self.prob = prob
         with torch.no_grad():
             return self._rng.choice(self.action_space, p=prob)
 

@@ -3,10 +3,9 @@ from datetime import datetime
 import gym
 import numpy as np
 import torch
-import torch.nn as nn
 import random
 
-from tqdm import tqdm
+from gym.wrappers import TimeLimit
 from torch import float32, int64
 
 from classes.Agents import AcAgent
@@ -15,26 +14,29 @@ from classes.Models import ValueNet, PolicyNet
 from drawing import plot_result_frames
 from multiprocessing import Manager, Pool
 
-seed = 333  # np.random.randint(10_000)
+seed = np.random.randint(10_000)
 device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-# env
-env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
-env_actions = 4
-env_state_dim = 8
-# params
-lr = 0.001
+
+env_name = 'CartPole-v1'  # LunarLander-v2
+env_actions = 2
+env_state_dim = 4
+save_model = False
+
+lr = 0.002
 hidden = 256
 gamma = 0.99
 max_frames = 50_000
-avg_frames = 1000
-batch_size = 32
-processes = 5
+max_episode_steps = 500
+avg_frames = 1_000
+batch_size = 64
+clamp = 1e-08
+processes = 3
 agents = 3
 
 
 def to_tensor(x, dtype=float32):
-    return torch.as_tensor(x, dtype=dtype).to(device)
+    return torch.as_tensor(np.array(x), dtype=dtype).to(device)
 
 
 def print_progress(agent_number, message):
@@ -55,30 +57,32 @@ def main(agent_number):
     value_net = ValueNet(env_state_dim, hidden).to(device)
     policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
-    memory = ReplayMemory()
-    env = gym.make(env_name)
+    memory = ReplayMemory(seed=local_seed)
+    # env = TimeLimit(gym.make(env_name, render_mode='human'), max_episode_steps=max_episode_steps)
+    env = TimeLimit(gym.make(env_name), max_episode_steps=max_episode_steps)
     agent = AcAgent(env.action_space, policy_net, local_seed)
 
     score = np.zeros(max_frames)
     final = False
+    truncated = False
     current_score = 0
     prev_score = 0
     episodes = 0
-    state = env.reset(seed=local_seed)[0]
+    state, info = env.reset(seed=local_seed)
 
     # for t in tqdm(range(max_frames)):
     for t in range(max_frames):
-        if final:
+        if final or truncated:
             prev_score = current_score
             current_score = 0
             episodes += 1
-            state = env.reset()[0]
+            state, info = env.reset()
         action = agent.get_action(state)
-        next_state, reward, final, _, _ = env.step(action)
+        next_state, reward, final, truncated, info = env.step(action)
         memory.push(state, action, next_state, reward, final)
         state = next_state
 
-        current_score += 1
+        current_score += reward
         score[t] = prev_score
 
         if len(memory) > batch_size:
@@ -89,13 +93,14 @@ def main(agent_number):
             next_states = to_tensor(batch.next_state)
             finals = to_tensor(batch.final)
 
-            # 1-step Actor-Critic
             # ----------- gradient step 1: CRITIC
-            advance = rewards + (1 - finals) * gamma * value_net(next_states) - value_net(states)
+            advance = rewards + (1 - finals) * gamma * value_net(next_states).T - value_net(states).T
             critic_loss = (1/2 * advance ** 2).mean()
             critic_grad = torch.autograd.grad(critic_loss, value_net.parameters())
             with torch.no_grad():
                 for param, param_grad in zip(value_net.parameters(), critic_grad):
+                    if clamp:
+                        param_grad.data.clamp_(-clamp, clamp)
                     param.copy_(param - lr * param_grad)
             # ----------- gradient step 2: ACTOR
             indices = torch.stack((actions, actions))
@@ -104,12 +109,14 @@ def main(agent_number):
             actor_grad = torch.autograd.grad(actor_loss, policy_net.parameters())
             with torch.no_grad():
                 for param, param_grad in zip(policy_net.parameters(), actor_grad):
+                    if clamp:
+                        param_grad.data.clamp_(-clamp, clamp)
                     param.copy_(param - lr * param_grad)
             if t % 100 == 0:
-                print_progress(agent_number, f"score: {prev_score}, C-loss: {critic_loss}, A-loss: {actor_loss}")
-
+                print_progress(agent_number, f"{t}/{max_frames}| score: {current_score}, "
+                                             f"critic_loss: {float(critic_loss)}, actor_loss: {float(actor_loss)}")
     env.close()
-    return episodes, score
+    return episodes, score, value_net, policy_net
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
@@ -120,23 +127,30 @@ if __name__ == '__main__':
     with Manager() as manager, Pool(processes=processes) as pool:
         print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
         pool_args = [(agent,) for agent in range(agents)]
-        agent_results = pool.starmap(main, pool_args)  # [(episodes, score, eps), (episodes, score, eps)]
+        agent_results = pool.starmap(main, pool_args)
         print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
 
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
+        value_nets = [result[2] for result in agent_results]
+        policy_nets = [result[3] for result in agent_results]
         print(f"played episodes: {episodes}")
 
-        title = f'{env_name} AC {agents} agents\n' \
+        title = f'{env_name} {max_episode_steps} AC {agents} agents\n ' \
                 f'hidden: {hidden}(selu), ' \
                 f'batch: {batch_size}, ' \
                 f'lr: {lr}, ' \
                 f'gamma: {gamma}, ' \
-                f'softmax, ' \
+                f'clamp: {clamp}' \
                 f'seed: {seed}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/ac/{timestamp}_ac_{agents}.png'
+        filename = f'./output/ac/{timestamp}_ac_{agents}'
+        if save_model:
+            torch.save(value_nets[0].state_dict(), filename + '_V.pth')
+            torch.save(policy_nets[0].state_dict(), filename + '_pi.pth')
         plot_result_frames(scores, epsilon=None, title=title, info=None,
-                           filename=filename, lr=lr, mean_window=avg_frames)
+                           filename=filename+'.png', lr=lr, mean_window=avg_frames)
+
+
 
 

@@ -143,6 +143,7 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                                                                       global_value_net.parameters(), grad_dist_value):
                             param.copy_(param - elasticity_v * grad_distance)
                             master_param.copy_(master_param + elasticity_v * grad_distance)
+
                         for param, master_param, grad_distance in zip(policy_net.parameters(),
                                                                       global_policy_net.parameters(), grad_dist_policy):
                             param.copy_(param - elasticity_p * grad_distance)
