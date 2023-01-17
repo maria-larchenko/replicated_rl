@@ -21,6 +21,7 @@ device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.i
 env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
 env_actions = 4
 env_state_dim = 8
+save_model = False
 
 lr = 0.001
 hidden = 256
@@ -34,7 +35,7 @@ processes = 3
 agents = 3
 
 update_frequency = 32
-elasticity = 0.1
+elasticity = False
 
 
 def to_tensor(x, dtype=float32):
@@ -44,6 +45,36 @@ def to_tensor(x, dtype=float32):
 def print_progress(agent_number, message, filter=True):
     if not filter or agent_number == 0:
         print(f"[{agent_number}]::" + message)
+
+
+def get_filename():
+    if elasticity:
+        timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
+        return f'./output/ac_elastic/{timestamp}_ac_elastic_{agents}'
+    else:
+        timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
+        return f'./output/ac/{timestamp}_ac_{agents}'
+
+
+def get_title():
+    if elasticity:
+        return f'{env_name} {max_episode_steps}| AC Elastic {agents} agents\n' \
+               f'update_frequency: {update_frequency} ' \
+               f'elasticity: {elasticity} \n' \
+               f'hidden: {hidden}(selu) ' \
+               f'batch: {batch_size} ' \
+               f'lr: {lr} ' \
+               f'gamma: {gamma} ' \
+               f'clamp: {clamp} ' \
+               f'seed: {seed}'
+    else:
+        return f'{env_name} {max_episode_steps}| AC {agents} agents\n ' \
+               f'hidden: {hidden}(selu), ' \
+               f'batch: {batch_size}, ' \
+               f'lr: {lr}, ' \
+               f'gamma: {gamma}, ' \
+               f'clamp: {clamp}' \
+               f'seed: {seed}'
 
 
 def main(agent_number, global_value_net, global_policy_net, update_lock):
@@ -59,10 +90,9 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     value_net = ValueNet(env_state_dim, hidden).to(device)
     policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
 
-    tmp_value_net = ValueNet(env_state_dim, hidden).to(device)
-    tmp_policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
-
-    if elasticity > 0:
+    if elasticity:
+        tmp_value_net = ValueNet(env_state_dim, hidden).to(device)
+        tmp_policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
         value_net.load_state_dict(global_value_net.state_dict())
         policy_net.load_state_dict(global_policy_net.state_dict())
 
@@ -72,21 +102,21 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     agent = AcAgent(env.action_space, policy_net, local_seed)
 
     score = np.zeros(max_frames)
-    final = False
-    current_score = 0
-    prev_score = 0
+    final, truncated = False, False
+    current_score, prev_score = 0, 0
     episodes = 0
     state, info = env.reset(seed=local_seed)
 
     try:
         for t in range(max_frames):
-            if final:
+
+            if final or truncated:
                 prev_score = current_score
                 current_score = 0
                 episodes += 1
                 state, info = env.reset()
             action = agent.get_action(state)
-            next_state, reward, final, terminated, _ = env.step(action)
+            next_state, reward, final, truncated, _ = env.step(action)
             memory.push(state, action, next_state, reward, final)
             state = next_state
 
@@ -101,7 +131,7 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                 next_states = to_tensor(batch.next_state)
                 finals = to_tensor(batch.final)
 
-                if t % update_frequency == 0 and elasticity > 0:
+                if elasticity and t % update_frequency == 0:
                     tmp_value_net.load_state_dict(value_net.state_dict())
                     tmp_policy_net.load_state_dict(policy_net.state_dict())
 
@@ -125,10 +155,10 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                             param_grad.data.clamp_(-clamp, clamp)
                         param.copy_(param - lr * param_grad)
 
-                if t % update_frequency == 0:  # ---------------- elastic update:
-                    distances = 0
-                    with update_lock:
-                        with torch.no_grad():
+                distances = 0
+                if elasticity and t % update_frequency == 0:  # ---------------- elastic update:
+                    with torch.no_grad():
+                        with update_lock:
                             for param, tmp_param, master_param in zip(value_net.parameters(), tmp_value_net.parameters(),
                                                                       global_value_net.parameters()):
                                 distances += torch.mean(tmp_param - master_param)
@@ -138,22 +168,27 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                                                                       global_policy_net.parameters()):
                                 param.copy_(param - elasticity * (tmp_param - master_param))
                                 master_param.copy_(master_param + elasticity * (tmp_param - master_param))
-                    print_progress(agent_number, f"{t}/{max_frames}| score: {prev_score}, "
-                                                 f"critic_loss: {float(critic_loss)}, "
-                                                 f"actor_loss: {float(actor_loss)}, "
-                                                 f"param_grad: {torch.mean(param_grad)},"
+                if t % 100 == 0:
+                    print_progress(agent_number, f"{t}/{max_frames}| score: {np.around(prev_score, decimals=3)}, "
+                                                 f"critic_loss: {np.around(float(critic_loss), decimals=5)}, "
+                                                 f"actor_loss: {np.around(float(actor_loss), decimals=5)}, "
+                                                 f"param_grad: {torch.mean(param_grad)}, "
                                                  f"distances: {float(distances)}")
     except ValueError as error:
         msg = f"{t}/{max_frames}| score: {prev_score}, critic_loss: {float(critic_loss)}, actor_loss: {float(actor_loss)} distances: {float(distances)}, act_prob: {agent.prob}"
         print_progress(agent_number, str(error), filter=False)
         print_progress(agent_number, msg, filter=False)
     env.close()
+    if save_model and agent_number == 0:
+        filename = get_filename()
+        torch.save(value_net.state_dict(), filename + '_V.pth')
+        torch.save(policy_net.state_dict(), filename + '_pi.pth')
     return episodes, score
 
 
 # https://google.github.io/styleguide/pyguide.html#317-main
 if __name__ == '__main__':
-    print(f"MULTIPROCESSING AC, processes: {processes}")
+    print(f"MULTIPROCESSING AC {'ELASTIC' if elasticity else ''}, processes: {processes}")
     print(f"SEED: {seed}")
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -175,19 +210,9 @@ if __name__ == '__main__':
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
         print(f"played episodes: {episodes}")
-
-        title = f'{env_name} {max_episode_steps} AC Elastic {agents} agents\n' \
-                f'update_frequency: {update_frequency}, ' \
-                f'elasticity: {elasticity}, \n' \
-                f'hidden: {hidden}(selu), ' \
-                f'batch: {batch_size}, ' \
-                f'lr: {lr}, ' \
-                f'gamma: {gamma}, ' \
-                f'clamp: {clamp}' \
-                f'seed: {seed}'
-        timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
-        filename = f'./output/ac_elastic/{timestamp}_ac_elastic_{agents}.png'
+        filename = get_filename()
+        title = get_title()
         plot_result_frames(scores, epsilon=None, title=title, info=None,
-                           filename=filename, lr=lr, mean_window=avg_frames)
+                           filename=filename+'.png', lr=lr, mean_window=avg_frames)
 
 
