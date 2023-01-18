@@ -23,10 +23,10 @@ env_actions = 4
 env_state_dim = 8
 save_model = False
 
-lr = 0.001
+lr = 0.0001
 hidden = 256
 gamma = 0.99
-max_frames = 50_000
+max_frames = 100_000
 max_episode_steps = 500
 avg_frames = 1000
 batch_size = 64
@@ -69,11 +69,11 @@ def get_title():
                f'seed: {seed}'
     else:
         return f'{env_name} {max_episode_steps}| AC {agents} agents\n ' \
-               f'hidden: {hidden}(selu), ' \
-               f'batch: {batch_size}, ' \
-               f'lr: {lr}, ' \
-               f'gamma: {gamma}, ' \
-               f'clamp: {clamp}' \
+               f'hidden: {hidden}(selu) ' \
+               f'batch: {batch_size} ' \
+               f'lr: {lr} ' \
+               f'gamma: {gamma} ' \
+               f'clamp: {clamp} ' \
                f'seed: {seed}'
 
 
@@ -161,11 +161,11 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                         with update_lock:
                             for param, tmp_param, master_param in zip(value_net.parameters(), tmp_value_net.parameters(),
                                                                       global_value_net.parameters()):
-                                distances += torch.mean(tmp_param - master_param)
                                 param.copy_(param - elasticity * (tmp_param - master_param))
                                 master_param.copy_(master_param + elasticity * (tmp_param - master_param))
                             for param, tmp_param, master_param in zip(policy_net.parameters(), tmp_policy_net.parameters(),
                                                                       global_policy_net.parameters()):
+                                distances += torch.mean(tmp_param - master_param)
                                 param.copy_(param - elasticity * (tmp_param - master_param))
                                 master_param.copy_(master_param + elasticity * (tmp_param - master_param))
                 if t % 100 == 0:
@@ -175,14 +175,13 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                                                  f"param_grad: {torch.mean(param_grad)}, "
                                                  f"distances: {float(distances)}")
     except ValueError as error:
-        msg = f"{t}/{max_frames}| score: {prev_score}, critic_loss: {float(critic_loss)}, actor_loss: {float(actor_loss)} distances: {float(distances)}, act_prob: {agent.prob}"
+        msg = f"{t}/{max_frames}| score: {prev_score}, critic_loss: {critic_loss}, actor_loss: {actor_loss} distances: {distances}, act_prob: {agent.prob}"
         print_progress(agent_number, str(error), filter=False)
         print_progress(agent_number, msg, filter=False)
     env.close()
     if save_model and agent_number == 0:
-        filename = get_filename()
-        torch.save(value_net.state_dict(), filename + '_V.pth')
-        torch.save(policy_net.state_dict(), filename + '_pi.pth')
+        torch.save(value_net.state_dict(), get_filename()+'_v.pth')
+        torch.save(policy_net.state_dict(), get_filename()+'_pi.pth')
     return episodes, score
 
 
