@@ -31,10 +31,9 @@ class AcAgent(Agent):
 
     def get_action(self, state, *args):
         state = self.to_tensor(state)
-        prob = self.model(state).cpu().detach().numpy()
-        self.prob = prob
+        self.prob = self.model(state).cpu().detach().numpy()
         with torch.no_grad():
-            return self._rng.choice(self.action_space, p=prob)
+            return self._rng.choice(self.action_space, p=self.prob)
 
 
 class DqnAgent(Agent):
@@ -47,7 +46,15 @@ class DqnAgent(Agent):
         self.eps_min = None
         self.eps_decay = None
         self.eps_decrease = None
-        self.softmax = nn.Softmax(dim=0)
+        self.temperature = False
+
+    def softmax(self, x):
+        # if self.clamp:
+        #     # x = x.data.clamp_(self.clamp, 1-self.clamp)
+        #     x = x.data.clamp_(-3, 3)
+        ex = torch.exp(x / self.temperature)
+        ex = ex / ex.sum(0)
+        return ex
 
     def set_const_greediness(self, eps_0):
         self.greedy_type = 'const'
@@ -65,8 +72,10 @@ class DqnAgent(Agent):
         self.eps_min = eps_min
         self.eps_decay = eps_decay
 
-    def set_softmax_greediness(self):
+    def set_softmax_greediness(self, temperature=False):
         self.greedy_type = 'softmax'
+        if temperature:
+            self.temperature = temperature
 
     def get_greediness(self):
         if self.eps is None or self.greedy_type == 'const':
@@ -81,17 +90,17 @@ class DqnAgent(Agent):
 
     def get_eps_info(self):
         if self.greedy_type == 'softmax':
-            return 'eps: softmax'
+            return f'eps: softmax T {self.temperature}'
         else:
             return f'eps_0: {self.eps_0}\n eps_min: {self.eps_min}\n eps_decay: {self.eps_decay}'
 
     def get_action(self, state, *args):
         state = self.to_tensor(state)
-        with torch.no_grad():    # for efficiency, don't calc grad
+        with torch.no_grad():
             if self.greedy_type == 'softmax':
                 qval = self.model(state)
-                prob = self.softmax(qval).cpu().detach().numpy()
-                return self._rng.choice(self.action_space, p=prob)
+                self.prob = self.softmax(qval).cpu().detach().numpy()
+                return self._rng.choice(self.action_space, p=self.prob)
             elif np.random.uniform() < self.get_greediness():
                 return self._rng.choice(self.action_space)
             else:

@@ -43,23 +43,35 @@ class ValueNet(nn.Module):
 
 
 class PolicyNet(nn.Module):
-    def __init__(self, inputs, hidden, outputs):
+    def __init__(self, inputs, hidden, outputs, clamp=False, temperature=1.0):
         super(PolicyNet, self).__init__()
         self.hidden = hidden
+        self.clamp = clamp
+        self.temperature = temperature
         self.model = nn.Sequential(
             nn.Linear(inputs, self.hidden),
             nn.SELU(),
             nn.Linear(self.hidden, self.hidden),
             nn.SELU(),
             nn.Linear(self.hidden, outputs),
-            nn.Softmax(dim=0),
         )
 
+    def softmax(self, x):
+        # if self.clamp:
+        #     # x = x.data.clamp_(self.clamp, 1-self.clamp)
+        #     x = x.data.clamp_(-3, 3)
+        ex = torch.exp(x / self.temperature)
+        ex = ex / ex.sum(0)
+        return ex
+
     def forward(self, x):
-        return self.model(x)
+        return self.softmax(self.model(x))
 
     def zeros_like(self):
         zeros = []
         for p in self.parameters():
             zeros.append(torch.zeros_like(p))
         return zeros
+
+
+
