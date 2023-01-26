@@ -19,30 +19,36 @@ device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available()
 device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
 
 env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
-env_actions = 4
-env_state_dim = 8
 save_model = False
 
-lr = 0.005
+lr = 0.001
 hidden = 256
 gamma = 0.99
-max_frames = 100_000
+max_frames = 50_000
 max_episode_steps = 500
 avg_frames = 1_000
-processes = 3
-agents = 3
+temperature = 2
+processes = 4
+agents = 4
 
 
 def to_tensor(x, dtype=float32):
-    return torch.as_tensor(x, dtype=dtype).to(device)
+    return torch.as_tensor(np.array(x), dtype=dtype).to(device)
 
 
-def print_progress(agent_number, message):
-    if agent_number == 0:
-        print(message)
+def get_dim(env_space):
+    if isinstance(env_space, gym.spaces.Discrete):
+        return env_space.n
+    if isinstance(env_space, gym.spaces.Box):
+        return env_space.shape[0]
 
 
-def main(agent_number, global_value_net, global_policy_net, update_lock):
+def print_progress(agent_number, message, filter=True):
+    if not filter or agent_number == 0:
+        print(f"[{agent_number}]::" + message)
+
+
+def main(agent_number, update_lock):
     local_seed = agent_number + seed
     torch.manual_seed(local_seed)
     torch.cuda.manual_seed(local_seed)
@@ -53,7 +59,7 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     torch.backends.cudnn.deterministic = True
 
     value_net = ValueNet(env_state_dim, hidden).to(device)
-    policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
+    policy_net = PolicyNet(env_state_dim, hidden, env_action_dim, temperature=temperature).to(device)
 
     memory = BackwardMemory()
     # env = TimeLimit(gym.make(env_name, render_mode='human'), max_episode_steps=max_episode_steps)
@@ -61,9 +67,9 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
     agent = AcAgent(env.action_space, policy_net, local_seed)
     state = env.reset(seed=local_seed)[0]
     score = np.zeros(max_frames)
-    episodes = 0
     current_score = 0
     previous_score = 0
+    episodes = 0
     T = 0
 
     while T < max_frames:
@@ -84,7 +90,6 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
 
             current_score += reward
             score[T] = previous_score
-
             T += 1
             # actions.append(action)
         state = env.reset()[0]
@@ -121,9 +126,8 @@ def main(agent_number, global_value_net, global_policy_net, update_lock):
                     param.copy_(param - lr / memory_length * param_grad)
                 for param, param_grad in zip(global_policy_net.parameters(), policy_grad):
                     param.copy_(param - lr / memory_length * param_grad)
-        print_progress(agent_number, f"{T}/{max_frames}| score: {current_score}, "
+        print_progress(agent_number, f"{T}/{max_frames}| score: {previous_score}, "
                                      f"critic_loss: {float(critic_loss)}, actor_loss: {float(actor_loss)}")
-
     env.close()
     return episodes, score
 
@@ -139,23 +143,24 @@ if __name__ == '__main__':
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
+    env_state_dim = get_dim(gym.make(env_name).observation_space)
+    env_action_dim = get_dim(gym.make(env_name).action_space)
     global_value_net = ValueNet(env_state_dim, hidden).to(device)
-    global_policy_net = PolicyNet(env_state_dim, hidden, env_actions).to(device)
+    global_policy_net = PolicyNet(env_state_dim, hidden, env_action_dim).to(device)
 
     with Manager() as manager, Pool(processes=processes) as pool:
         update_lock = manager.Lock()
         print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
-        pool_args = [(agent, global_value_net, global_policy_net, update_lock)
+        pool_args = [(agent, update_lock)
                      for agent in range(agents)]
         agent_results = pool.starmap(main, pool_args)  # [(episodes, score), (episodes, score)]
         print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
-
         episodes = [result[0] for result in agent_results]
         scores = [result[1] for result in agent_results]
         print(f"played episodes: {episodes}")
 
-        title = f'{env_name} {max_episode_steps} A3C {agents} agents\n ' \
-                f'hidden: {hidden}(selu), batch: episode, lr: {lr}, gamma: {gamma}, softmax, seed: {seed}'
+        title = f'{env_name} {max_episode_steps}| {agents} agents| A3C seed: {seed}\n ' \
+                f'hidden: {hidden}(selu), batch: episode, lr: {lr}, gamma: {gamma}, T: {temperature}'
         timestamp = datetime.now().strftime("%Y.%m.%d %H-%M-%S")
         filename = f'./output/a3c/{timestamp}_a3c_{agents}'
         if save_model:
