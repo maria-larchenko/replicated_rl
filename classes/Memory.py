@@ -7,11 +7,11 @@ import torch
 Transition = namedtuple('Transition', ('state', 'action', 'next_state', 'reward', 'final'))
 
 
-class ReplayMemory:
+class Memory:
 
-    def __init__(self, device, seed=None, capacity=10000):
-        random.seed(seed)
+    def __init__(self, device, capacity=10000):
         self.device = device
+        self.capacity = capacity
         self.memory = deque([], maxlen=capacity)
 
     def to_tensor(self, x, dtype=torch.float32,):
@@ -19,6 +19,23 @@ class ReplayMemory:
 
     def push(self, *args):
         self.memory.append(Transition(*args))
+
+    def pop(self):
+        return self.memory.pop()
+
+    def clear(self):
+        self.memory = deque([], maxlen=self.capacity)
+
+    def __len__(self):
+        return len(self.memory)
+
+
+class ReplayMemory(Memory):
+
+    def __init__(self, device, capacity=10000, seed=None):
+        super().__init__(device, capacity)
+        random.seed(seed)
+        self.seed = seed
 
     def sample_batch(self, batch_size):
         transitions = random.sample(self.memory, batch_size)
@@ -33,26 +50,4 @@ class ReplayMemory:
         next_states = self.to_tensor(batch.next_state)
         finals = self.to_tensor(batch.final)
         return states, actions, rewards, next_states, finals
-
-    def __len__(self):
-        return len(self.memory)
-
-
-class BackwardMemory:
-
-    def __init__(self, capacity=10000):
-        self.capacity = capacity
-        self.memory = deque([], maxlen=capacity)
-
-    def push(self, *args):
-        self.memory.append(Transition(*args))
-
-    def pop(self):
-        return self.memory.pop()
-
-    def clear(self):
-        self.memory = deque([], maxlen=self.capacity)
-
-    def __len__(self):
-        return len(self.memory)
 
