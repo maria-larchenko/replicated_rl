@@ -24,16 +24,16 @@ save_model = False
 lr = 0.001
 hidden = 512
 gamma = 0.99
-max_frames = 50_000
+max_frames = 150_000
 max_episode_steps = 500
 avg_frames = 1000
 batch_size = 128
 clamp = False  # 1e-8
-temperature = 3
-processes = 3
-agents = 3
+temperature = 5
+processes = 4
+agents = 4
 
-update_frequency = 32
+update_frequency = 64
 polyak_coef = 0.1
 elasticity = 0.1
 
@@ -244,6 +244,7 @@ if __name__ == '__main__':
         title = get_title()
         plot_result_frames(scores, epsilon=epsilons[0], title=title, info=info,
                            filename=filename+'.png', lr=lr, mean_window=avg_frames)
+        np.savetxt(filename+'_scores.txt', np.array(scores).T, header=title)
 
 
 
