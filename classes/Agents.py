@@ -1,12 +1,17 @@
 import numpy as np
 import torch
-from torch import nn
+import gym
 
 
 class Agent:
 
     def __init__(self, action_space, model, seed=None, device=None, dtype=torch.float32):
-        self.action_space = np.arange(0, action_space.n)
+        if isinstance(action_space, gym.spaces.Discrete):
+            self._act_type = 0
+            self.action_space = np.arange(0, action_space.n)
+        if isinstance(action_space, gym.spaces.Box):
+            self._act_type = 1
+            self.action_space = action_space.shape[0]
         self._rng = np.random.default_rng(seed)
         self.model = model
         self.device = device
@@ -15,12 +20,24 @@ class Agent:
         if device is None:
             self.device = torch.device('cpu')
         if seed is not None:
+            self.seed = seed
             torch.manual_seed(seed)
             torch.cuda.manual_seed(seed)
             torch.cuda.manual_seed_all(seed)
             np.random.seed(seed)
 
+    def _get_action(self, prob=None):
+        if self._act_type == 0:
+            self.prob = prob
+            with torch.no_grad():
+                return self._rng.choice(self.action_space, p=self.prob)
+
     def get_action(self, state, *args):
+        """implemented in subclasses"""
+        pass
+
+    def get_greedy_action(self, state, *args):
+        """implemented in subclasses"""
         pass
 
     def to_tensor(self, x):
@@ -29,11 +46,18 @@ class Agent:
 
 class AcAgent(Agent):
 
+    def __init__(self, action_space, model, seed=None, device=None, dtype=torch.float32):
+        super().__init__(action_space, model, seed, device, dtype)
+
     def get_action(self, state, *args):
         state = self.to_tensor(state)
-        self.prob = self.model(state).cpu().detach().numpy()
-        with torch.no_grad():
-            return self._rng.choice(self.action_space, p=self.prob)
+        prob = self.model(state).cpu().detach().numpy()
+        return super()._get_action(prob)
+
+    def get_greedy_action(self, state, *args):
+        state = self.to_tensor(state)
+        prob = self.model(state).cpu().detach().numpy()
+        return super()._get_action(prob)
 
 
 class DqnAgent(Agent):
@@ -49,35 +73,27 @@ class DqnAgent(Agent):
         self.temperature = False
 
     def softmax(self, x):
-        # if self.clamp:
-        #     # x = x.data.clamp_(self.clamp, 1-self.clamp)
-        #     x = x.data.clamp_(-3, 3)
         ex = torch.exp(x / self.temperature)
         ex = ex / ex.sum(0)
         return ex
 
-    def set_const_greediness(self, eps_0):
-        self.greedy_type = 'const'
-        self.eps_0 = eps_0
-
-    def set_lin_greediness(self, eps_0, eps_min, eps_steps):
-        self.greedy_type = 'linear'
-        self.eps_0 = eps_0
-        self.eps_min = eps_min
-        self.eps_decrease = (eps_0 - eps_min) / eps_steps
-
-    def set_exp_greediness(self, eps_0, eps_min, eps_decay):
-        self.greedy_type = 'exp'
-        self.eps_0 = eps_0
-        self.eps_min = eps_min
-        self.eps_decay = eps_decay
-
-    def set_softmax_greediness(self, temperature=False):
-        self.greedy_type = 'softmax'
-        if temperature:
+    def set_greediness(self, greedy_type, eps_0=0.1, eps_min=0.1, eps_steps=1.0, eps_decay=1.0, temperature=1.0):
+        """ types are:  const, linear, exp, softmax """
+        self.greedy_type = greedy_type
+        if greedy_type == 'const':
+            self.eps_0 = eps_0
+        if greedy_type == 'linear':
+            self.eps_0 = eps_0
+            self.eps_min = eps_min
+            self.eps_decrease = (eps_0 - eps_min) / eps_steps
+        if greedy_type == 'exp':
+            self.eps_0 = eps_0
+            self.eps_min = eps_min
+            self.eps_decay = eps_decay
+        if greedy_type == 'softmax':
             self.temperature = temperature
 
-    def get_greediness(self):
+    def greediness_step(self):
         if self.eps is None or self.greedy_type == 'const':
             self.eps = self.eps_0
         elif self.greedy_type == 'linear':
@@ -90,19 +106,24 @@ class DqnAgent(Agent):
 
     def get_eps_info(self):
         if self.greedy_type == 'softmax':
-            return f'eps: softmax T {self.temperature}'
-        else:
+            return f'softmax T: {self.temperature}'
+        elif self.greedy_type == 'linear':
+            return f'eps_0: {self.eps_0}\n eps_min: {self.eps_min}\n eps_decay: {np.around(self.eps_decrease, decimals=5)}'
+        elif self.greedy_type == 'exp':
             return f'eps_0: {self.eps_0}\n eps_min: {self.eps_min}\n eps_decay: {self.eps_decay}'
+        elif self.greedy_type == 'const':
+            return f'eps_0: {self.eps_0}'
+
+    def get_greedy_action(self, state, *args):
+        return self.model(state).argmax().item()
 
     def get_action(self, state, *args):
         state = self.to_tensor(state)
         with torch.no_grad():
             if self.greedy_type == 'softmax':
-                qval = self.model(state)
-                self.prob = self.softmax(qval).cpu().detach().numpy()
-                return self._rng.choice(self.action_space, p=self.prob)
-            elif np.random.uniform() < self.get_greediness():
-                return self._rng.choice(self.action_space)
+                prob = self.softmax(self.model(state)).cpu().detach().numpy()
+                return super()._get_action(prob)
+            elif np.random.uniform() < self.greediness_step():
+                return super()._get_action()
             else:
-                return self.model(state).argmax().item()
-
+                return self.get_greedy_action(state)

@@ -43,10 +43,9 @@ class ValueNet(nn.Module):
 
 
 class PolicyNet(nn.Module):
-    def __init__(self, inputs, hidden, outputs, clamp=False, temperature=1.0):
+    def __init__(self, inputs, hidden, outputs, temperature=1.0):
         super(PolicyNet, self).__init__()
         self.hidden = hidden
-        self.clamp = clamp
         self.temperature = temperature
         self.model = nn.Sequential(
             nn.Linear(inputs, self.hidden),
@@ -57,9 +56,6 @@ class PolicyNet(nn.Module):
         )
 
     def softmax(self, x):
-        # if self.clamp:
-        #     # x = x.data.clamp_(self.clamp, 1-self.clamp)
-        #     x = x.data.clamp_(-3, 3)
         ex = torch.exp(x / self.temperature)
         ex = ex / ex.sum(0)
         return ex

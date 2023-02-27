@@ -6,41 +6,41 @@ import torch
 import torch.nn as nn
 import random
 
-from multiprocessing import Manager, Pool
-from torch import float32, int64
+# from multiprocessing import Manager, Pool, Process
+from torch.multiprocessing import Manager, Pool, Process, set_start_method
+from torch import float32
 from classes.Agents import DqnAgent
 from classes.Memory import ReplayMemory
 from classes.Models import DQN
 from drawing import plot_results, plot_result_frames
 from gym.wrappers import TimeLimit
 
-seed = np.random.randint(10_000)
-device = torch.device('cpu')  # torch.device('cuda' if torch.cuda.is_available() else 'cpu')  #
-device_name = 'cpu'  # torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  #
-
-env_name = 'LunarLander-v2'  # 'LunarLander-v2'  # LunarLander-v2 CartPole-v1
+seed = 9882  # np.random.randint(10_000)
+env_name = 'CartPole-v1'   # LunarLander-v2   CartPole-v1  Acrobot-v1  MountainCar-v0
 save_model = False
 
 lr = 0.001
 hidden = 512
 gamma = 0.99
-max_frames = 150_000
-max_episode_steps = 500
+max_frames = 10_000
+max_episode_steps = 500 if env_name != "MountainCar-v0" else 200
 avg_frames = 1000
 batch_size = 128
-clamp = False  # 1e-8
-temperature = 5
-processes = 4
-agents = 4
+mem_capacity = 10_000
+
+processes = 3
+agents = 3
+
+eps_type = 'linear'  # const exp linear softmax
+temperature = 5.0
+eps_0 = 1.0
+eps_min = 0.05
+eps_steps = 50_000
+eps_decay = 0.0
 
 update_frequency = 64
 polyak_coef = 0.1
-elasticity = 0.1
-
-# eps_0 = 1.0
-# eps_min = 0.1
-# eps_steps = 50_000
-# eps_decay = 0.0
+elasticity = False  # 0.1
 
 
 def to_tensor(x, dtype=float32):
@@ -58,8 +58,8 @@ def grad_step(loss, model):
     grad = torch.autograd.grad(loss, model.parameters())
     with torch.no_grad():
         for param, param_grad in zip(model.parameters(), grad):
-            if clamp:
-                param_grad.data.clamp_(-clamp, clamp)
+            # if clamp:
+            #     param_grad.data.clamp_(-clamp, clamp)
             param.copy_(param - lr * param_grad)
     return param_grad
 
@@ -67,9 +67,9 @@ def grad_step(loss, model):
 def grad_step_optimiser(loss, model, optimizer):
     optimizer.zero_grad()
     loss.backward()
-    if clamp:
-        for param_grad in model.parameters():
-            param_grad.data.clamp_(-clamp, clamp)
+    # if clamp:
+    #     for param_grad in model.parameters():
+    #         param_grad.data.clamp_(-clamp, clamp)
     optimizer.step()
 
 
@@ -130,11 +130,11 @@ def get_title():
            f'T: {temperature} ' \
            f'batch: {batch_size} ' \
            f'gamma: {gamma} ' \
-           f'clamp: {clamp} '
+           f'mem: {mem_capacity}'
     return txt
 
 
-def main(agent_number, update_lock):
+def main(agent_number, update_lock, env_s, env_a, global_model, device):
     local_seed = agent_number + seed
     torch.manual_seed(local_seed)
     torch.cuda.manual_seed(local_seed)
@@ -144,30 +144,24 @@ def main(agent_number, update_lock):
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
-    model = DQN(env_state_dim, hidden, env_action_dim).to(device)
-    target = DQN(env_state_dim, hidden, env_action_dim).to(device)
+    model = DQN(env_s, hidden, env_a).to(device)
+    target = DQN(env_s, hidden, env_a).to(device)
     target.load_state_dict(model.state_dict())
-
-    memory = ReplayMemory(seed=local_seed, device=device)
+    memory = ReplayMemory(seed=local_seed, device=device, capacity=mem_capacity)
     mse_loss = nn.MSELoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    # weights = sum(p.numel() for p in model.parameters())
-    # print(f'{weights} weights, model: {model}')
-    # print(f'Using {device} device: {device_name}')
+    print_progress(agent_number, f'{sum(p.numel() for p in model.parameters())} weights, model: {model} using {device}')
 
     # env = TimeLimit(gym.make(env_name, render_mode="human"), max_episode_steps=max_episode_steps)
     env = TimeLimit(gym.make(env_name), max_episode_steps=max_episode_steps)
-
-    agent = DqnAgent(env.action_space, model, local_seed)
-    # agent.set_lin_greediness(eps_0, eps_min, eps_steps)
-    agent.set_softmax_greediness(temperature=temperature)
+    agent = DqnAgent(env.action_space, model, local_seed, device)
+    agent.set_greediness(eps_type, eps_0, eps_min, eps_steps, eps_decay, temperature)
     score = np.zeros(max_frames)
     epsilon = np.zeros(max_frames)
     learning_rates = np.zeros(max_frames)
 
     final, truncated = False, False
-    current_score, prev_score = 0, 0
-    episodes = 0
+    current_score, prev_score, episodes = 0, 0, 0
     distance = 0
     try:
         state, info = env.reset(seed=local_seed)
@@ -184,7 +178,7 @@ def main(agent_number, update_lock):
 
             current_score += reward
             score[t] = prev_score
-            epsilon[t] = agent.get_greediness()
+            epsilon[t] = agent.eps
             learning_rates[t] = optimizer.param_groups[0]['lr']
 
             if len(memory) > batch_size:
@@ -222,14 +216,21 @@ def main(agent_number, update_lock):
 if __name__ == '__main__':
     print(f"MULTIPROCESSING DQN, processes: {processes}")
     print(f"SEED: {seed}")
-    env_state_dim = get_dim(gym.make(env_name).observation_space)
-    env_action_dim = get_dim(gym.make(env_name).action_space)
-    global_model = DQN(env_state_dim, hidden, env_action_dim).to(device)
-
+    try:
+        set_start_method('spawn')
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
+    except RuntimeError:
+        print("failed to use spawn for CUDA")
+        device = torch.device('cpu')
+        device_name = '-'
+    env_s = get_dim(gym.make(env_name).observation_space)
+    env_a = get_dim(gym.make(env_name).action_space)
+    global_model = DQN(env_s, hidden, env_a).to(device)
     with Manager() as manager, Pool(processes=processes) as pool:
         update_lock = manager.Lock()
         print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
-        pool_args = [(agent, update_lock) for agent in range(agents)]
+        pool_args = [(agent, update_lock, env_s, env_a, global_model, device) for agent in range(agents)]
         agent_results = pool.starmap(main, pool_args)  # [(episodes, score, eps), (episodes, score, eps)]
         print(f"------------------------------------ finished: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
 

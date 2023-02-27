@@ -16,26 +16,24 @@ from drawing import plot_result_frames
 from torch.multiprocessing import Manager, Pool, Process, set_start_method
 
 seed = 8803  # np.random.randint(10_000)
-env_name = 'LunarLander-v2'  # LunarLander-v2 CartPole-v1 BipedalWalker-v3
+env_name = 'LunarLander-v2'  # Acrobot-v1 LunarLander-v2 CartPole-v1 BipedalWalker-v3 MountainCar-v0
 save_model = False
 a3c = False
-mem_clear = False
 
 lr = 0.001
 hidden = 512
 gamma = 0.99
-max_frames = 200_000
-max_episode_steps = 500
+max_frames = 500_000
+max_episode_steps = 500 if env_name != "MountainCar-v0" else 200
 avg_frames = 1000
 batch_size = 256
 mem_capacity = batch_size
-clamp = False  # 1e-8
-temperature = 5
-processes = 6
-agents = 6
+temperature = 5.0
+processes = 4
+agents = 4
 
 update_frequency = 32
-elasticity = 0.1
+elasticity = False  # 0.1
 elastic_tmp = False
 
 
@@ -50,8 +48,8 @@ def grad_step(loss, model):
     grad = torch.autograd.grad(loss, model.parameters())
     with torch.no_grad():
         for param, param_grad in zip(model.parameters(), grad):
-            if clamp:
-                param_grad.data.clamp_(-clamp, clamp)
+            # if clamp:
+            #     param_grad.data.clamp_(-clamp, clamp)
             param.copy_(param - lr * param_grad)
     return param_grad
 
@@ -102,12 +100,10 @@ def get_title():
               f'hidden: {hidden}(selu) batch: episode lr: {lr} gamma: {gamma} T: {temperature}'
     else:
         txt = f'{env_name} {max_episode_steps}| {agents} agents| AC {"Elastic " if elasticity else ""}seed {seed}\n'
-        if mem_clear:
-            txt += f'mem: clear, '
         if elasticity:
             txt += f'elasticity: {elasticity}, update_freq: {update_frequency}'
             txt += ' with tmp net\n' if elastic_tmp else '\n'
-        txt += f'hidden: {hidden}(selu) lr: {lr} batch: {batch_size} gamma: {gamma} T: {temperature} clamp: {clamp}'
+        txt += f'hidden: {hidden}(selu) lr: {lr} batch: {batch_size} gamma: {gamma} T: {temperature} mem: {mem_capacity}'
     return txt
 
 
@@ -170,8 +166,6 @@ def main_ac(agent_number, update_lock, env_s, env_a, global_value_net, global_po
                 advance = rewards + (1 - finals) * gamma * next_v_values.T - value_net(states).T  # recalculated without target!
                 actor_loss = (- advance * torch.log(act_prob)).mean()
                 param_grad = grad_step(actor_loss, policy_net)
-                if mem_clear:
-                    memory.clear()
                 # # ---------------- elastic update:
                 if elasticity and t % update_frequency == 0:
                     if elastic_tmp:
@@ -295,14 +289,16 @@ if __name__ == '__main__':
     device_name = 'cpu'
     try:
         set_start_method('spawn')
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # torch.device('cpu')  #
-        device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'  # 'cpu'  #
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device_name = torch.cuda.get_device_name(device=device) if torch.cuda.is_available() else '-'
     except RuntimeError:
-        pass
+        print("failed to use spawn for CUDA")
+        device = torch.device('cpu')
+        device_name = '-'
     env_s = get_dim(gym.make(env_name).observation_space)
     env_a = get_dim(gym.make(env_name).action_space)
     global_value_net = ValueNet(env_s, hidden).to(device)
-    global_policy_net = PolicyNet(env_s, hidden, env_a, temperature=temperature).to(device)
+    global_policy_net = PolicyNet(env_s, hidden, env_a).to(device)
     with Manager() as manager, Pool(processes=processes) as pool:
         update_lock = manager.Lock()
         print(f"------------------------------------ started: {datetime.now().strftime('%Y.%m.%d %H-%M-%S')}")
@@ -319,5 +315,6 @@ if __name__ == '__main__':
         title = get_title()
         plot_result_frames(scores, epsilon=None, title=title, info=None,
                            filename=filename + '.png', lr=lr, mean_window=avg_frames)
+        np.savetxt(filename + '_scores.txt', np.array(scores).T, header=title)
 
 
