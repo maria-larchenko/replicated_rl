@@ -15,32 +15,32 @@ from classes.Models import DQN
 from drawing import plot_results, plot_result_frames
 from gym.wrappers import TimeLimit
 
-seed = 9882  # np.random.randint(10_000)
-env_name = 'CartPole-v1'   # LunarLander-v2   CartPole-v1  Acrobot-v1  MountainCar-v0
-save_model = False
+seed = np.random.randint(10_000)
+env_name = 'MountainCar-v0'   # LunarLander-v2   CartPole-v1  Acrobot-v1  MountainCar-v0
+save_model = True
 
 lr = 0.001
 hidden = 512
 gamma = 0.99
-max_frames = 10_000
+max_frames = 500_000
 max_episode_steps = 500 if env_name != "MountainCar-v0" else 200
 avg_frames = 1000
-batch_size = 128
+batch_size = 256
 mem_capacity = 10_000
 
-processes = 3
-agents = 3
+processes = 4
+agents = 4
 
 eps_type = 'linear'  # const exp linear softmax
 temperature = 5.0
 eps_0 = 1.0
-eps_min = 0.05
-eps_steps = 50_000
+eps_min = 0.5
+eps_steps = 500_000
 eps_decay = 0.0
 
-update_frequency = 64
+update_frequency = 32
 polyak_coef = 0.1
-elasticity = False  # 0.1
+elasticity = False # 0.1
 
 
 def to_tensor(x, dtype=float32):
